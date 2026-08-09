@@ -50,7 +50,7 @@ fn killed_tool_process_resumes_from_persisted_spec() {
         .expect("resume process starts");
     assert!(resumed.status.success(), "resume failed: {resumed:?}");
 
-    let connection = Connection::open(&database).expect("database opens");
+    let connection = open_connection(&database).expect("database opens");
     let status: String = connection
         .query_row(
             "SELECT status FROM runs WHERE run_id = ?1",
@@ -96,7 +96,7 @@ fn killed_tool_process_resumes_from_persisted_spec() {
 
 fn wait_for_tool_result(database: &PathBuf) -> String {
     for _ in 0..150 {
-        if let Ok(connection) = Connection::open(database) {
+        if let Ok(connection) = open_connection(database) {
             let run_id: Option<String> = match connection
                 .query_row("SELECT run_id FROM runs LIMIT 1", [], |row| row.get(0))
                 .optional()
@@ -108,19 +108,25 @@ fn wait_for_tool_result(database: &PathBuf) -> String {
                 }
             };
             if let Some(run_id) = run_id {
-                let count: i64 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM events WHERE run_id = ?1 AND event_type = 'tool.result'",
-                        params![run_id],
-                        |row| row.get(0),
-                    )
-                    .expect("event lookup succeeds");
-                if count > 0 {
-                    return run_id;
+                let count: Result<i64, _> = connection.query_row(
+                    "SELECT COUNT(*) FROM events WHERE run_id = ?1 AND event_type = 'tool.result'",
+                    params![run_id],
+                    |row| row.get(0),
+                );
+                if let Ok(count) = count {
+                    if count > 0 {
+                        return run_id;
+                    }
                 }
             }
         }
         thread::sleep(Duration::from_millis(20));
     }
     panic!("tool result was not persisted before timeout");
+}
+
+fn open_connection(database: &PathBuf) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(database)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    Ok(connection)
 }
