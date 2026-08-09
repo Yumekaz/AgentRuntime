@@ -74,7 +74,15 @@ fn killed_tool_process_resumes_from_persisted_spec() {
             |row| row.get(0),
         )
         .expect("checkpoint count loads");
-    assert_eq!(invocations, 2);
+    let deduplicated: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE run_id = ?1 AND event_type = 'tool.deduplicated'",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .expect("deduplication count loads");
+    assert_eq!(invocations, 1);
+    assert_eq!(deduplicated, 1);
     assert_eq!(checkpoints, 1);
     assert_eq!(
         std::fs::read_to_string(workspace.join("output.txt")).expect("output reads"),

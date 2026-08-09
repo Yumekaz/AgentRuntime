@@ -65,6 +65,7 @@ pub(crate) struct StoredEvent {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ToolStepSpec {
+    pub(crate) idempotency_key: String,
     pub(crate) workspace_root: String,
     pub(crate) tool_name: String,
     pub(crate) path: String,
@@ -142,11 +143,12 @@ impl Store {
 
         transaction.execute(
             "INSERT OR REPLACE INTO tool_steps
-             (run_id, step_index, workspace_root, tool_name, path, contents, read_only, denied_tool)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (run_id, step_index, idempotency_key, workspace_root, tool_name, path, contents, read_only, denied_tool)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 run_id,
                 step_index as i64,
+                spec.idempotency_key,
                 spec.workspace_root,
                 spec.tool_name,
                 spec.path,
@@ -356,22 +358,73 @@ impl Store {
     ) -> Result<Option<ToolStepSpec>, StoreError> {
         self.connection
             .query_row(
-                "SELECT workspace_root, tool_name, path, contents, read_only, denied_tool
+                "SELECT idempotency_key, workspace_root, tool_name, path, contents, read_only, denied_tool
                  FROM tool_steps WHERE run_id = ?1 AND step_index = ?2",
                 params![run_id, step_index as i64],
                 |row| {
                     Ok(ToolStepSpec {
-                        workspace_root: row.get(0)?,
-                        tool_name: row.get(1)?,
-                        path: row.get(2)?,
-                        contents: row.get(3)?,
-                        read_only: row.get::<_, i64>(4)? != 0,
-                        denied_tool: row.get(5)?,
+                        idempotency_key: row.get(0)?,
+                        workspace_root: row.get(1)?,
+                        tool_name: row.get(2)?,
+                        path: row.get(3)?,
+                        contents: row.get(4)?,
+                        read_only: row.get::<_, i64>(5)? != 0,
+                        denied_tool: row.get(6)?,
                     })
                 },
             )
             .optional()
             .map_err(StoreError::Sql)
+    }
+
+    pub(crate) fn load_tool_effect(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT output FROM tool_effects WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
+    pub(crate) fn record_tool_result(
+        &self,
+        run_id: &str,
+        step_index: usize,
+        idempotency_key: &str,
+        output: &str,
+        event_payload: &str,
+    ) -> Result<bool, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO tool_effects
+             (idempotency_key, run_id, step_index, output, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                idempotency_key,
+                run_id,
+                step_index as i64,
+                output,
+                timestamp()
+            ],
+        )?;
+        if inserted == 0 {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        append_event(
+            &transaction,
+            run_id,
+            "tool.result",
+            Some(step_index),
+            event_payload,
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub(crate) fn load_events(&self, run_id: &str) -> Result<Vec<StoredEvent>, StoreError> {
@@ -423,6 +476,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS tool_steps (
                  run_id TEXT NOT NULL,
                  step_index INTEGER NOT NULL,
+                 idempotency_key TEXT NOT NULL,
                  workspace_root TEXT NOT NULL,
                  tool_name TEXT NOT NULL,
                  path TEXT NOT NULL,
@@ -431,8 +485,35 @@ impl Store {
                  denied_tool TEXT,
                  PRIMARY KEY (run_id, step_index),
                  FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS tool_effects (
+                 idempotency_key TEXT PRIMARY KEY,
+                 run_id TEXT NOT NULL,
+                 step_index INTEGER NOT NULL,
+                 output TEXT NOT NULL,
+                 recorded_at INTEGER NOT NULL,
+                 FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
              );",
         )?;
+        self.ensure_column("tool_steps", "idempotency_key", "TEXT NOT NULL DEFAULT ''")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> Result<(), StoreError> {
+        let exists: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            self.connection.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
         Ok(())
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::audit;
-use crate::exec::{self, ExecutionError, ToolAction};
+use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError, ToolStepSpec};
@@ -296,6 +296,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
         _ => unreachable!(),
     };
     let spec = ToolStepSpec {
+        idempotency_key: idempotency_key(&run_id, 0),
         workspace_root,
         tool_name: tool_name.to_owned(),
         path: relative_path.to_owned(),

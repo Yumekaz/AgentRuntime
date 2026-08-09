@@ -63,6 +63,10 @@ impl ToolAction {
     }
 }
 
+pub(crate) fn idempotency_key(run_id: &str, step_index: usize) -> String {
+    format!("{run_id}:step:{step_index}")
+}
+
 pub(crate) fn execute_tool_step(
     store: &Store,
     run_id: &str,
@@ -81,6 +85,33 @@ pub(crate) fn execute_tool_step_with_pause(
     action: &ToolAction,
     pause_ms: u64,
 ) -> Result<String, ExecutionError> {
+    let key = idempotency_key(run_id, definition.index);
+    execute_tool_step_with_key(store, run_id, definition, router, action, &key, pause_ms)
+}
+
+fn execute_tool_step_with_key(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    router: &ToolRouter,
+    action: &ToolAction,
+    key: &str,
+    pause_ms: u64,
+) -> Result<String, ExecutionError> {
+    store.mark_running(run_id)?;
+
+    if let Some(output) = store.load_tool_effect(key)? {
+        store.record_event(
+            run_id,
+            "tool.deduplicated",
+            Some(definition.index),
+            &format!("name={} idempotency_key={key}", action.name()),
+        )?;
+        store.complete_step(run_id, definition.index, &output)?;
+        store.finish_run(run_id)?;
+        return Ok(output);
+    }
+
     if let Some(stored_step) = store
         .load_steps(run_id)?
         .into_iter()
@@ -93,13 +124,15 @@ pub(crate) fn execute_tool_step_with_pause(
         }
     }
 
-    store.mark_running(run_id)?;
     let argument_hash = sha256_hex(action.arguments().as_bytes());
     store.record_event(
         run_id,
         "tool.invoked",
         Some(definition.index),
-        &format!("name={} args_sha256={argument_hash}", action.name()),
+        &format!(
+            "name={} args_sha256={argument_hash} idempotency_key={key}",
+            action.name()
+        ),
     )?;
 
     let result = match action {
@@ -132,12 +165,13 @@ pub(crate) fn execute_tool_step_with_pause(
         }
     };
 
-    store.record_event(
+    store.record_tool_result(
         run_id,
-        "tool.result",
-        Some(definition.index),
+        definition.index,
+        key,
+        &output,
         &format!(
-            "name={} status=ok result_sha256={}",
+            "name={} status=ok result_sha256={} idempotency_key={key}",
             action.name(),
             sha256_hex(output.as_bytes())
         ),
@@ -164,6 +198,11 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
         let Some(spec) = store.load_tool_step(run_id, stored_step.index)? else {
             continue;
         };
+        if spec.idempotency_key != idempotency_key(run_id, stored_step.index) {
+            return Err(ExecutionError::Store(StoreError::InvalidStatus(
+                "persisted idempotency key does not match run step".to_owned(),
+            )));
+        }
 
         let tool = Tool::parse(&spec.tool_name).ok_or_else(|| {
             ExecutionError::Store(StoreError::InvalidStatus(format!(
