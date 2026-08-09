@@ -9,7 +9,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt --help";
 
-const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]";
+const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -32,6 +32,7 @@ pub(crate) fn run() -> ExitCode {
         Some("run") => run_command(args.collect()),
         Some("resume") => resume_command(args.collect()),
         Some("status") => status_command(args.collect()),
+        Some("audit") => audit_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -112,6 +113,36 @@ fn status_command(arguments: Vec<String>) -> ExitCode {
         println!("run_id={}", run.run_id);
         println!("status={}", run.status);
         println!("progress={}/{}", run.current_step, run.total_steps);
+        Ok(())
+    }) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => command_error(error),
+    }
+}
+
+fn audit_command(arguments: Vec<String>) -> ExitCode {
+    let options = match parse_options(arguments, false) {
+        Ok(options) => options,
+        Err(error) => return usage_error(error),
+    };
+    let Some(run_id) = options.run_id else {
+        return usage_error("--run-id is required for audit".to_owned());
+    };
+
+    match Store::open(&options.store).and_then(|store| {
+        let events = store.load_events(&run_id)?;
+        for event in events {
+            let step = event
+                .step_index
+                .map(|index| format!(" step={index}"))
+                .unwrap_or_default();
+            let payload = if event.payload.is_empty() {
+                String::new()
+            } else {
+                format!(" payload={}", event.payload)
+            };
+            println!("{} {}{}{}", event.sequence, event.event_type, step, payload);
+        }
         Ok(())
     }) {
         Ok(()) => ExitCode::SUCCESS,

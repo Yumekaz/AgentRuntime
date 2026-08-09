@@ -99,6 +99,13 @@ mod tests {
             let run = store.load_run(&run_id).expect("run loads");
             assert_eq!(run.current_step, 2);
             assert_eq!(run.status.as_str(), "running");
+            let events = store.load_events(&run_id).expect("events load");
+            assert_eq!(events.len(), 6);
+            assert_eq!(events[0].event_type, "run.created");
+            assert_eq!(events[1].event_type, "run.started");
+            assert_eq!(events[2].event_type, "step.completed");
+            assert_eq!(events[3].event_type, "checkpoint.saved");
+            assert_eq!(events[5].event_type, "checkpoint.saved");
         }
 
         {
@@ -110,6 +117,17 @@ mod tests {
             let steps = store.load_steps(&run_id).expect("steps load");
             assert!(steps.iter().all(|step| step.completed));
             assert!(steps.iter().all(|step| step.output.is_some()));
+            let events = store
+                .load_events(&run_id)
+                .expect("events load after resume");
+            assert_eq!(events.len(), 12);
+            assert_eq!(events[6].event_type, "run.resumed");
+            assert_eq!(events[11].event_type, "run.finished");
+            assert!(
+                events
+                    .windows(2)
+                    .all(|pair| pair[0].sequence < pair[1].sequence)
+            );
         }
 
         std::fs::remove_file(path).expect("temporary database removes");

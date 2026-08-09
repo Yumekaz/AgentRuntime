@@ -55,6 +55,14 @@ pub(crate) struct StoredStep {
     pub(crate) output: Option<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct StoredEvent {
+    pub(crate) sequence: i64,
+    pub(crate) event_type: String,
+    pub(crate) step_index: Option<usize>,
+    pub(crate) payload: String,
+}
+
 pub(crate) struct Store {
     connection: Connection,
 }
@@ -96,18 +104,37 @@ impl Store {
             )?;
         }
 
+        append_event(&transaction, run_id, "run.created", None, "")?;
+
         transaction.commit()?;
         Ok(())
     }
 
     pub(crate) fn mark_running(&self, run_id: &str) -> Result<(), StoreError> {
-        let changed = self.connection.execute(
+        let previous_status: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(previous_status) = previous_status else {
+            return Err(StoreError::RunNotFound(run_id.to_owned()));
+        };
+        let event_type = if previous_status == RunStatus::Created.as_str() {
+            "run.started"
+        } else {
+            "run.resumed"
+        };
+
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "UPDATE runs SET status = 'running', updated_at = ?1 WHERE run_id = ?2",
             params![timestamp(), run_id],
         )?;
-        if changed == 0 {
-            return Err(StoreError::RunNotFound(run_id.to_owned()));
-        }
+        append_event(&transaction, run_id, event_type, None, "")?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -125,7 +152,8 @@ impl Store {
             params![output, run_id, step_index as i64],
         )?;
 
-        if changed == 0 {
+        let newly_completed = changed > 0;
+        if !newly_completed {
             let exists: Option<String> = transaction
                 .query_row(
                     "SELECT status FROM steps WHERE run_id = ?1 AND step_index = ?2",
@@ -147,18 +175,55 @@ impl Store {
              WHERE run_id = ?3",
             params![(step_index + 1) as i64, timestamp(), run_id],
         )?;
+        if newly_completed {
+            append_event(
+                &transaction,
+                run_id,
+                "step.completed",
+                Some(step_index),
+                output,
+            )?;
+            append_event(
+                &transaction,
+                run_id,
+                "checkpoint.saved",
+                Some(step_index),
+                &format!("frontier={}", step_index + 1),
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
 
     pub(crate) fn finish_run(&self, run_id: &str) -> Result<(), StoreError> {
-        let changed = self.connection.execute(
+        let existing: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_none() {
+            return Err(StoreError::RunNotFound(run_id.to_owned()));
+        }
+        if existing.as_deref() == Some(RunStatus::Succeeded.as_str()) {
+            return Ok(());
+        }
+
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
             "UPDATE runs SET status = 'succeeded', updated_at = ?1 WHERE run_id = ?2",
             params![timestamp(), run_id],
         )?;
-        if changed == 0 {
-            return Err(StoreError::RunNotFound(run_id.to_owned()));
-        }
+        append_event(
+            &transaction,
+            run_id,
+            "run.finished",
+            None,
+            "status=succeeded",
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -212,6 +277,23 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    pub(crate) fn load_events(&self, run_id: &str) -> Result<Vec<StoredEvent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT sequence, event_type, step_index, payload
+             FROM events WHERE run_id = ?1 ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![run_id], |row| {
+            Ok(StoredEvent {
+                sequence: row.get(0)?,
+                event_type: row.get(1)?,
+                step_index: row.get::<_, Option<i64>>(2)?.map(|value| value as usize),
+                payload: row.get(3)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
+    }
+
     fn initialize(&self) -> Result<(), StoreError> {
         self.connection.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -231,10 +313,40 @@ impl Store {
                  PRIMARY KEY (run_id, step_index),
                  UNIQUE (run_id, step_id),
                  FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS events (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 run_id TEXT NOT NULL,
+                 event_type TEXT NOT NULL,
+                 step_index INTEGER,
+                 payload TEXT NOT NULL,
+                 occurred_at INTEGER NOT NULL,
+                 FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
              );",
         )?;
         Ok(())
     }
+}
+
+fn append_event(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    event_type: &str,
+    step_index: Option<usize>,
+    payload: &str,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO events (run_id, event_type, step_index, payload, occurred_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            run_id,
+            event_type,
+            step_index.map(|value| value as i64),
+            payload,
+            timestamp()
+        ],
+    )?;
+    Ok(())
 }
 
 fn timestamp() -> i64 {
