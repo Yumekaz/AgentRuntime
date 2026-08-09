@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::audit;
+use crate::agent;
 use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
 use crate::gate;
 use crate::model::{FakeProvider, Message, ModelRequest};
@@ -21,6 +22,8 @@ const MODEL_USAGE: &str =
     "Usage:\n  agentrt model fake --store <path> --model <name> --prompt <text> --response <text>";
 
 const GATE_USAGE: &str = "Usage:\n  agentrt gate exists --workspace <path> --path <relative-path>\n  agentrt gate contains --workspace <path> --path <relative-path> --text <expected>";
+
+const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>]";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -47,6 +50,7 @@ pub(crate) fn run() -> ExitCode {
         Some("tool") => tool_command(args.collect()),
         Some("model") => model_command(args.collect()),
         Some("gate") => gate_command(args.collect()),
+        Some("agent") => agent_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -82,6 +86,7 @@ fn run_command(arguments: Vec<String>) -> ExitCode {
                 Err(StoreError::InvalidStatus(error.to_string()))
             }
             Err(ExecutionError::Model(error)) => Err(StoreError::InvalidStatus(error.to_string())),
+            Err(ExecutionError::GateFailed(error)) => Err(StoreError::InvalidStatus(error)),
         }
     }) {
         Ok(()) => ExitCode::SUCCESS,
@@ -107,6 +112,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
             }
             ExecutionError::Sandbox(error) => StoreError::InvalidStatus(error.to_string()),
             ExecutionError::Model(error) => StoreError::InvalidStatus(error.to_string()),
+            ExecutionError::GateFailed(error) => StoreError::InvalidStatus(error),
         })?;
         println!("run_id={run_id}");
         println!("status=succeeded");
@@ -365,6 +371,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
         }
         Err(ExecutionError::Store(error)) => command_error(error),
         Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::GateFailed(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in tool step".to_owned())
         }
@@ -431,6 +438,7 @@ fn model_command(arguments: Vec<String>) -> ExitCode {
         Err(ExecutionError::Model(error)) => command_error(error),
         Err(ExecutionError::Store(error)) => command_error(error),
         Err(ExecutionError::Sandbox(error)) => command_error(error),
+        Err(ExecutionError::GateFailed(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in model step".to_owned())
         }
@@ -492,6 +500,70 @@ fn gate_command(arguments: Vec<String>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+fn agent_command(arguments: Vec<String>) -> ExitCode {
+    if arguments.first().map(String::as_str) != Some("repo-fix") {
+        return usage_error(AGENT_USAGE.to_owned());
+    }
+
+    let mut workspace = None;
+    let mut path = None;
+    let mut find = None;
+    let mut replace = None;
+    let mut store_path = PathBuf::from(".agentrt/state.db");
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--workspace" | "--path" | "--find" | "--replace" | "--store" => {
+                let option = arguments[index].clone();
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error(format!("{option} requires a value\n\n{AGENT_USAGE}"));
+                };
+                match option.as_str() {
+                    "--workspace" => workspace = Some(PathBuf::from(value)),
+                    "--path" => path = Some(value.clone()),
+                    "--find" => find = Some(value.clone()),
+                    "--replace" => replace = Some(value.clone()),
+                    "--store" => store_path = PathBuf::from(value),
+                    _ => unreachable!(),
+                }
+            }
+            "--help" | "-h" => return usage_error(AGENT_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{AGENT_USAGE}")),
+        }
+        index += 1;
+    }
+
+    let Some(workspace) = workspace else {
+        return usage_error(format!("--workspace is required\n\n{AGENT_USAGE}"));
+    };
+    let Some(path) = path else {
+        return usage_error(format!("--path is required\n\n{AGENT_USAGE}"));
+    };
+    let Some(find) = find else {
+        return usage_error(format!("--find is required\n\n{AGENT_USAGE}"));
+    };
+    let Some(replace) = replace else {
+        return usage_error(format!("--replace is required\n\n{AGENT_USAGE}"));
+    };
+
+    match agent::repo_fix(&store_path, &workspace, &path, &find, &replace) {
+        Ok(result) => {
+            println!("run_id={}", result.run_id);
+            println!("status=succeeded");
+            println!("replacement_sha256={}", crate::audit::sha256_hex(result.output.as_bytes()));
+            ExitCode::SUCCESS
+        }
+        Err(ExecutionError::Store(error)) => command_error(error),
+        Err(ExecutionError::Sandbox(error)) => sandbox_error(error),
+        Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::GateFailed(error)) => command_error(error),
+        Err(ExecutionError::SimulatedCrash { .. }) => {
+            usage_error("unexpected simulated crash in agent workflow".to_owned())
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 //! Deterministic step execution and recovery coordination.
 
 use crate::audit::sha256_hex;
+use crate::gate;
 use crate::model::{ModelError, ModelProvider, ModelRequest, complete_with_audit};
 use crate::run::{RunStatus, StepDefinition};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
@@ -12,6 +13,7 @@ pub(crate) enum ExecutionError {
     Store(StoreError),
     Sandbox(SandboxError),
     Model(ModelError),
+    GateFailed(String),
     SimulatedCrash { run_id: String, completed: usize },
 }
 
@@ -21,6 +23,7 @@ impl fmt::Display for ExecutionError {
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Sandbox(error) => write!(formatter, "{error}"),
             Self::Model(error) => write!(formatter, "{error}"),
+            Self::GateFailed(error) => write!(formatter, "gate failed: {error}"),
             Self::SimulatedCrash { run_id, completed } => write!(
                 formatter,
                 "simulated process crash after {completed} completed step(s) in run `{run_id}`"
@@ -109,7 +112,64 @@ pub(crate) fn execute_tool_step_with_pause(
     pause_ms: u64,
 ) -> Result<String, ExecutionError> {
     let key = idempotency_key(run_id, definition.index);
-    execute_tool_step_with_key(store, run_id, definition, router, action, &key, pause_ms)
+    execute_tool_step_with_key(store, run_id, definition, router, action, &key, pause_ms, true)
+}
+
+pub(crate) fn execute_tool_step_in_run(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    router: &ToolRouter,
+    action: &ToolAction,
+) -> Result<String, ExecutionError> {
+    let key = idempotency_key(run_id, definition.index);
+    execute_tool_step_with_key(store, run_id, definition, router, action, &key, 0, false)
+}
+
+pub(crate) fn execute_gate_step_in_run(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    workspace: &str,
+    path: &str,
+    expected: &str,
+    finish_run: bool,
+) -> Result<String, ExecutionError> {
+    if store.load_run(run_id)?.status != RunStatus::Running {
+        store.mark_running(run_id)?;
+    }
+
+    if let Some(stored_step) = store
+        .load_steps(run_id)?
+        .into_iter()
+        .find(|step| step.index == definition.index)
+    {
+        if stored_step.completed {
+            let output = stored_step.output.unwrap_or_default();
+            if finish_run {
+                store.finish_run(run_id)?;
+            }
+            return Ok(output);
+        }
+    }
+
+    let result = gate::file_contains(workspace, path, expected);
+    store.record_event(
+        run_id,
+        "gate.evaluated",
+        Some(definition.index),
+        &result.to_string(),
+    )?;
+    if !result.passed {
+        return Err(ExecutionError::GateFailed(result.evidence));
+    }
+
+    let output = result.evidence;
+    store.complete_step(run_id, definition.index, &output)?;
+    if finish_run {
+        store.finish_run(run_id)?;
+    }
+    Ok(output)
 }
 
 fn execute_tool_step_with_key(
@@ -120,8 +180,11 @@ fn execute_tool_step_with_key(
     action: &ToolAction,
     key: &str,
     pause_ms: u64,
+    finish_run: bool,
 ) -> Result<String, ExecutionError> {
-    store.mark_running(run_id)?;
+    if store.load_run(run_id)?.status != RunStatus::Running {
+        store.mark_running(run_id)?;
+    }
 
     if let Some(output) = store.load_tool_effect(key)? {
         store.record_event(
@@ -131,7 +194,9 @@ fn execute_tool_step_with_key(
             &format!("name={} idempotency_key={key}", action.name()),
         )?;
         store.complete_step(run_id, definition.index, &output)?;
-        store.finish_run(run_id)?;
+        if finish_run {
+            store.finish_run(run_id)?;
+        }
         return Ok(output);
     }
 
@@ -142,7 +207,9 @@ fn execute_tool_step_with_key(
     {
         if stored_step.completed {
             let output = stored_step.output.unwrap_or_default();
-            store.finish_run(run_id)?;
+            if finish_run {
+                store.finish_run(run_id)?;
+            }
             return Ok(output);
         }
     }
@@ -203,7 +270,9 @@ fn execute_tool_step_with_key(
         std::thread::sleep(std::time::Duration::from_millis(pause_ms));
     }
     store.complete_step(run_id, definition.index, &output)?;
-    store.finish_run(run_id)?;
+    if finish_run {
+        store.finish_run(run_id)?;
+    }
     Ok(output)
 }
 
@@ -227,6 +296,27 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
             )));
         }
 
+        let definitions = StepDefinition::sequence(run.total_steps);
+        let finish_run = stored_step.index + 1 == run.total_steps;
+        if spec.tool_name == "gate_contains" {
+            execute_gate_step_in_run(
+                store,
+                run_id,
+                &definitions[stored_step.index],
+                &spec.workspace_root,
+                &spec.path,
+                spec.contents.as_deref().ok_or_else(|| {
+                    ExecutionError::Store(StoreError::InvalidStatus(
+                        "persisted gate has no expected text".to_owned(),
+                    ))
+                })?,
+                finish_run,
+            )?;
+            if finish_run {
+                return Ok(());
+            }
+            return resume_run(store, run_id);
+        }
         let tool = Tool::parse(&spec.tool_name).ok_or_else(|| {
             ExecutionError::Store(StoreError::InvalidStatus(format!(
                 "unknown persisted tool `{}`",
@@ -255,15 +345,33 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
             },
             Tool::ListDir => ToolAction::ListDir(spec.path),
         };
-        let definitions = StepDefinition::sequence(run.total_steps);
-        execute_tool_step(
-            store,
-            run_id,
-            &definitions[stored_step.index],
-            &router,
-            &action,
-        )?;
-        return Ok(());
+        if finish_run {
+            let key = idempotency_key(run_id, stored_step.index);
+            execute_tool_step_with_key(
+                store,
+                run_id,
+                &definitions[stored_step.index],
+                &router,
+                &action,
+                &key,
+                0,
+                true,
+            )?;
+        } else {
+            execute_tool_step_in_run(
+                store,
+                run_id,
+                &definitions[stored_step.index],
+                &router,
+                &action,
+            )?;
+        }
+
+        if finish_run {
+            return Ok(());
+        }
+
+        return resume_run(store, run_id);
     }
 
     let definitions = StepDefinition::sequence(run.total_steps);
