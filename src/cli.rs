@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use crate::audit;
 use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
+use crate::model::{FakeProvider, Message, ModelRequest};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError, ToolStepSpec};
@@ -14,6 +15,9 @@ const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt -
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
 const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>\n  --max-write-bytes <bytes>\n  --pause-ms <milliseconds>";
+
+const MODEL_USAGE: &str =
+    "Usage:\n  agentrt model fake --store <path> --model <name> --prompt <text> --response <text>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -38,6 +42,7 @@ pub(crate) fn run() -> ExitCode {
         Some("status") => status_command(args.collect()),
         Some("audit") => audit_command(args.collect()),
         Some("tool") => tool_command(args.collect()),
+        Some("model") => model_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -72,6 +77,7 @@ fn run_command(arguments: Vec<String>) -> ExitCode {
             Err(ExecutionError::Sandbox(error)) => {
                 Err(StoreError::InvalidStatus(error.to_string()))
             }
+            Err(ExecutionError::Model(error)) => Err(StoreError::InvalidStatus(error.to_string())),
         }
     }) {
         Ok(()) => ExitCode::SUCCESS,
@@ -96,6 +102,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
                 StoreError::RunNotFound("unexpected simulated crash".to_owned())
             }
             ExecutionError::Sandbox(error) => StoreError::InvalidStatus(error.to_string()),
+            ExecutionError::Model(error) => StoreError::InvalidStatus(error.to_string()),
         })?;
         println!("run_id={run_id}");
         println!("status=succeeded");
@@ -353,8 +360,75 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
             sandbox_error(error)
         }
         Err(ExecutionError::Store(error)) => command_error(error),
+        Err(ExecutionError::Model(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in tool step".to_owned())
+        }
+    }
+}
+
+fn model_command(arguments: Vec<String>) -> ExitCode {
+    if arguments.first().map(String::as_str) != Some("fake") {
+        return usage_error(MODEL_USAGE.to_owned());
+    }
+
+    let mut store_path = PathBuf::from(".agentrt/state.db");
+    let mut model = "fake-model".to_owned();
+    let mut prompt = None;
+    let mut response = "deterministic fake response".to_owned();
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--store" | "--model" | "--prompt" | "--response" => {
+                let option = arguments[index].clone();
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error(format!("{option} requires a value\n\n{MODEL_USAGE}"));
+                };
+                match option.as_str() {
+                    "--store" => store_path = PathBuf::from(value),
+                    "--model" => model = value.clone(),
+                    "--prompt" => prompt = Some(value.clone()),
+                    "--response" => response = value.clone(),
+                    _ => unreachable!(),
+                }
+            }
+            "--help" | "-h" => return usage_error(MODEL_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{MODEL_USAGE}")),
+        }
+        index += 1;
+    }
+    let Some(prompt) = prompt else {
+        return usage_error(format!("--prompt is required\n\n{MODEL_USAGE}"));
+    };
+
+    let run_id = new_run_id();
+    let definitions = StepDefinition::sequence(1);
+    let store = match Store::open(&store_path) {
+        Ok(store) => store,
+        Err(error) => return command_error(error),
+    };
+    if let Err(error) = store.create_run(&run_id, &definitions) {
+        return command_error(error);
+    }
+    let request = ModelRequest {
+        model,
+        messages: vec![Message::user(prompt)],
+        temperature: 0.0,
+    };
+    let provider = FakeProvider::new(response);
+    match exec::execute_llm_step(&store, &run_id, &definitions[0], &provider, &request) {
+        Ok(output) => {
+            println!("run_id={run_id}");
+            println!("status=succeeded");
+            println!("output={output}");
+            ExitCode::SUCCESS
+        }
+        Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::Store(error)) => command_error(error),
+        Err(ExecutionError::Sandbox(error)) => command_error(error),
+        Err(ExecutionError::SimulatedCrash { .. }) => {
+            usage_error("unexpected simulated crash in model step".to_owned())
         }
     }
 }

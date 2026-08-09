@@ -29,6 +29,7 @@ cargo run -- audit --store .agentrt/demo.db --run-id <id> --export .agentrt/bund
 cargo run -- tool list --workspace ./fixtures/workspace
 cargo run -- tool read --workspace ./fixtures/workspace --path input.txt
 cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --contents "safe"
+cargo run -- model fake --store .agentrt/model.db --model fake-model --prompt "summarize fixture" --response "fixture summary"
 ```
 
 Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.

@@ -1,6 +1,7 @@
 //! Deterministic step execution and recovery coordination.
 
 use crate::audit::sha256_hex;
+use crate::model::{ModelError, ModelProvider, ModelRequest, complete_with_audit};
 use crate::run::{RunStatus, StepDefinition};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError};
@@ -10,6 +11,7 @@ use std::fmt;
 pub(crate) enum ExecutionError {
     Store(StoreError),
     Sandbox(SandboxError),
+    Model(ModelError),
     SimulatedCrash { run_id: String, completed: usize },
 }
 
@@ -18,6 +20,7 @@ impl fmt::Display for ExecutionError {
         match self {
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Sandbox(error) => write!(formatter, "{error}"),
+            Self::Model(error) => write!(formatter, "{error}"),
             Self::SimulatedCrash { run_id, completed } => write!(
                 formatter,
                 "simulated process crash after {completed} completed step(s) in run `{run_id}`"
@@ -37,6 +40,12 @@ impl From<StoreError> for ExecutionError {
 impl From<SandboxError> for ExecutionError {
     fn from(error: SandboxError) -> Self {
         Self::Sandbox(error)
+    }
+}
+
+impl From<ModelError> for ExecutionError {
+    fn from(error: ModelError) -> Self {
+        Self::Model(error)
     }
 }
 
@@ -75,6 +84,20 @@ pub(crate) fn execute_tool_step(
     action: &ToolAction,
 ) -> Result<String, ExecutionError> {
     execute_tool_step_with_pause(store, run_id, definition, router, action, 0)
+}
+
+pub(crate) fn execute_llm_step<P: ModelProvider>(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    provider: &P,
+    request: &ModelRequest,
+) -> Result<String, ExecutionError> {
+    store.mark_running(run_id)?;
+    let response = complete_with_audit(store, run_id, definition.index, provider, request)?;
+    store.complete_step(run_id, definition.index, &response.text)?;
+    store.finish_run(run_id)?;
+    Ok(response.text)
 }
 
 pub(crate) fn execute_tool_step_with_pause(
@@ -289,6 +312,7 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::{ExecutionError, ToolAction, execute, execute_tool_step};
+    use crate::model::{FakeProvider, Message, ModelRequest};
     use crate::run::{StepDefinition, new_run_id};
     use crate::sandbox::{Policy, ToolRouter};
     use crate::store::Store;
@@ -436,5 +460,42 @@ mod tests {
         drop(store);
         std::fs::remove_file(database).expect("database removes");
         std::fs::remove_dir_all(workspace).expect("workspace removes");
+    }
+
+    #[test]
+    fn llm_step_is_checkpointed_and_audited() {
+        let database = temporary_store_path();
+        let run_id = new_run_id();
+        let definitions = StepDefinition::sequence(1);
+        let store = Store::open(&database).expect("store opens");
+        store
+            .create_run(&run_id, &definitions)
+            .expect("run creates");
+        let request = ModelRequest {
+            model: "fake-model".to_owned(),
+            messages: vec![Message::user("repair this fixture")],
+            temperature: 0.0,
+        };
+        let provider = FakeProvider::new("apply the safe fixture change");
+        let output = super::execute_llm_step(&store, &run_id, &definitions[0], &provider, &request)
+            .expect("llm step succeeds");
+        assert_eq!(output, "apply the safe fixture change");
+        let run = store.load_run(&run_id).expect("run loads");
+        assert_eq!(run.status.as_str(), "succeeded");
+        assert_eq!(run.current_step, 1);
+        let events = store.load_events(&run_id).expect("events load");
+        assert!(events.iter().any(|event| event.event_type == "llm.request"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "llm.response")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "checkpoint.saved")
+        );
+        drop(store);
+        std::fs::remove_file(database).expect("database removes");
     }
 }
