@@ -1,0 +1,14 @@
+[package]
+name = "agentrt"
+version = "0.1.0"
+edition = "2024"
+description = "A durable, sandboxed, auditable runtime for multi-step LLM work"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Yumekaz/AgentRuntime"
+keywords = ["agents", "llm", "runtime", "durability", "audit"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "agentrt"
+path = "src/main.rs"

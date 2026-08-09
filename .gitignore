@@ -1,1 +1,19 @@
+# Rust build output
+/target/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime state and exported evidence
+/runs/
+/artifacts/
+
+# Editor and operating-system noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
 PROJECT.md
