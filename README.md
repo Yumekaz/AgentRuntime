@@ -8,7 +8,7 @@ This repository is being built around one proof: kill a run mid-execution, resta
 
 ## Current status
 
-The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, persist and reconstruct tool actions after a process kill, display the ordered audit event stream, export a hashed audit bundle, and enforce a typed filesystem tool policy. Model calls and eval cases are not implemented yet.
+The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, persist and reconstruct tool actions after a process kill, display the ordered audit event stream, export a hashed audit bundle, enforce a typed filesystem tool policy, and provide fake/OpenAI-compatible model providers with audited calls. Durable LLM-step wiring and eval cases are not implemented yet.
 
 ## Run it
 
@@ -34,6 +34,8 @@ cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --con
 Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.
 Tool results use persisted idempotency keys: recovery deduplicates effects whose result was recorded before the crash. Arbitrary external side effects cannot honestly be claimed exactly-once without cooperation from the tool.
 The filesystem policy is not a Windows security boundary: it constrains these typed tools, rejects traversal and symlink writes, and bounds write size, but it does not jail arbitrary processes or network traffic.
+
+The model adapter supports deterministic `FakeProvider` tests and OpenAI-compatible chat-completions endpoints over HTTPS. Provider credentials are never included in audit payloads; request content is structurally redacted and response content is hashed.
 
 ## Scope
 
