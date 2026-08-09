@@ -4,6 +4,7 @@ mod audit;
 mod cli;
 mod eval;
 mod exec;
+mod gate;
 mod model;
 mod run;
 mod sandbox;

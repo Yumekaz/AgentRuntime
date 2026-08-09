@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use crate::audit;
 use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
+use crate::gate;
 use crate::model::{FakeProvider, Message, ModelRequest};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
@@ -18,6 +19,8 @@ const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path 
 
 const MODEL_USAGE: &str =
     "Usage:\n  agentrt model fake --store <path> --model <name> --prompt <text> --response <text>";
+
+const GATE_USAGE: &str = "Usage:\n  agentrt gate exists --workspace <path> --path <relative-path>\n  agentrt gate contains --workspace <path> --path <relative-path> --text <expected>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -43,6 +46,7 @@ pub(crate) fn run() -> ExitCode {
         Some("audit") => audit_command(args.collect()),
         Some("tool") => tool_command(args.collect()),
         Some("model") => model_command(args.collect()),
+        Some("gate") => gate_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -430,6 +434,64 @@ fn model_command(arguments: Vec<String>) -> ExitCode {
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in model step".to_owned())
         }
+    }
+}
+
+fn gate_command(arguments: Vec<String>) -> ExitCode {
+    let Some(kind) = arguments.first().map(String::as_str) else {
+        return usage_error(GATE_USAGE.to_owned());
+    };
+    if !matches!(kind, "exists" | "contains") {
+        return usage_error(format!("unknown gate `{kind}`\n\n{GATE_USAGE}"));
+    }
+
+    let mut workspace = None;
+    let mut path = None;
+    let mut text = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--workspace" | "--path" | "--text" => {
+                let option = arguments[index].clone();
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error(format!("{option} requires a value\n\n{GATE_USAGE}"));
+                };
+                match option.as_str() {
+                    "--workspace" => workspace = Some(value.clone()),
+                    "--path" => path = Some(value.clone()),
+                    "--text" => text = Some(value.clone()),
+                    _ => unreachable!(),
+                }
+            }
+            "--help" | "-h" => return usage_error(GATE_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{GATE_USAGE}")),
+        }
+        index += 1;
+    }
+
+    let Some(workspace) = workspace else {
+        return usage_error(format!("--workspace is required\n\n{GATE_USAGE}"));
+    };
+    let Some(path) = path else {
+        return usage_error(format!("--path is required\n\n{GATE_USAGE}"));
+    };
+    let result = match kind {
+        "exists" => gate::file_exists(&workspace, &path),
+        "contains" => {
+            let Some(text) = text else {
+                return usage_error(format!("--text is required\n\n{GATE_USAGE}"));
+            };
+            gate::file_contains(&workspace, &path, &text)
+        }
+        _ => unreachable!(),
+    };
+    let passed = gate::evaluate_all(std::slice::from_ref(&result));
+    println!("{result}");
+    if passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
