@@ -31,6 +31,9 @@ cargo run -- tool read --workspace ./fixtures/workspace --path input.txt
 cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --contents "safe"
 cargo run -- model fake --store .agentrt/model.db --model fake-model --prompt "summarize fixture" --response "fixture summary"
 cargo run -- agent repo-fix --workspace ./fixtures/workspace --path fixture.txt --find "status=broken" --replace "status=fixed" --store .agentrt/agent.db
+cargo run -- eval
+# Demonstrate a deliberate regression; this must exit with status 1.
+cargo run -- eval --break
 ```
 
 Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.

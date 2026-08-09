@@ -1,7 +1,7 @@
 //! AgentRT command-line entry point.
 
-mod audit;
 mod agent;
+mod audit;
 mod cli;
 mod eval;
 mod exec;

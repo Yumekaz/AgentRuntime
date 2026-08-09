@@ -112,7 +112,9 @@ pub(crate) fn execute_tool_step_with_pause(
     pause_ms: u64,
 ) -> Result<String, ExecutionError> {
     let key = idempotency_key(run_id, definition.index);
-    execute_tool_step_with_key(store, run_id, definition, router, action, &key, pause_ms, true)
+    execute_tool_step_with_key(
+        store, run_id, definition, router, action, &key, pause_ms, true,
+    )
 }
 
 pub(crate) fn execute_tool_step_in_run(

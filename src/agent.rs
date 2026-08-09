@@ -124,8 +124,7 @@ mod tests {
         let database = temporary_store_path();
         let workspace = temporary_workspace();
         std::fs::create_dir_all(&workspace).expect("workspace creates");
-        std::fs::write(workspace.join("fixture.txt"), "status=broken\n")
-            .expect("fixture writes");
+        std::fs::write(workspace.join("fixture.txt"), "status=broken\n").expect("fixture writes");
 
         let result = repo_fix(
             &database,
@@ -135,21 +134,45 @@ mod tests {
             "status=fixed",
         )
         .expect("repo fix succeeds");
-        assert_eq!(std::fs::read_to_string(workspace.join("fixture.txt")).unwrap(), "status=fixed\n");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("fixture.txt")).unwrap(),
+            "status=fixed\n"
+        );
 
         let store = Store::open(&database).expect("store reopens");
         let run = store.load_run(&result.run_id).expect("run loads");
         assert_eq!(run.status.as_str(), "succeeded");
         assert_eq!(run.current_step, 4);
-        assert!(store.load_steps(&result.run_id).unwrap().iter().all(|step| step.completed));
+        assert!(
+            store
+                .load_steps(&result.run_id)
+                .unwrap()
+                .iter()
+                .all(|step| step.completed)
+        );
         let events = store.load_events(&result.run_id).expect("events load");
-        assert!(events.iter().any(|event| event.event_type == "agent.created"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "agent.created")
+        );
         assert_eq!(
-            events.iter().filter(|event| event.event_type == "tool.invoked").count(),
+            events
+                .iter()
+                .filter(|event| event.event_type == "tool.invoked")
+                .count(),
             3
         );
-        assert!(events.iter().any(|event| event.event_type == "gate.evaluated"));
-        assert!(events.iter().any(|event| event.event_type == "run.finished"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "gate.evaluated")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "run.finished")
+        );
 
         drop(store);
         std::fs::remove_file(database).expect("database removes");

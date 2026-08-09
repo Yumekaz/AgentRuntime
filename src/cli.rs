@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::audit;
 use crate::agent;
+use crate::audit;
 use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
 use crate::gate;
 use crate::model::{FakeProvider, Message, ModelRequest};
@@ -24,6 +24,8 @@ const MODEL_USAGE: &str =
 const GATE_USAGE: &str = "Usage:\n  agentrt gate exists --workspace <path> --path <relative-path>\n  agentrt gate contains --workspace <path> --path <relative-path> --text <expected>";
 
 const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>]";
+
+const EVAL_USAGE: &str = "Usage:\n  agentrt eval [--break]";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -51,6 +53,7 @@ pub(crate) fn run() -> ExitCode {
         Some("model") => model_command(args.collect()),
         Some("gate") => gate_command(args.collect()),
         Some("agent") => agent_command(args.collect()),
+        Some("eval") => eval_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -554,7 +557,10 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
         Ok(result) => {
             println!("run_id={}", result.run_id);
             println!("status=succeeded");
-            println!("replacement_sha256={}", crate::audit::sha256_hex(result.output.as_bytes()));
+            println!(
+                "replacement_sha256={}",
+                crate::audit::sha256_hex(result.output.as_bytes())
+            );
             ExitCode::SUCCESS
         }
         Err(ExecutionError::Store(error)) => command_error(error),
@@ -564,6 +570,25 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in agent workflow".to_owned())
         }
+    }
+}
+
+fn eval_command(arguments: Vec<String>) -> ExitCode {
+    let mut break_regression = false;
+    for argument in arguments {
+        match argument.as_str() {
+            "--break" => break_regression = true,
+            "--help" | "-h" => return usage_error(EVAL_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{EVAL_USAGE}")),
+        }
+    }
+
+    let report = crate::eval::run_suite(break_regression);
+    print!("{report}");
+    if report.succeeded() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
