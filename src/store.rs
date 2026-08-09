@@ -227,6 +227,29 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn record_event(
+        &self,
+        run_id: &str,
+        event_type: &str,
+        step_index: Option<usize>,
+        payload: &str,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let exists: Option<String> = transaction
+            .query_row(
+                "SELECT run_id FROM runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(StoreError::RunNotFound(run_id.to_owned()));
+        }
+        append_event(&transaction, run_id, event_type, step_index, payload)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn load_run(&self, run_id: &str) -> Result<StoredRun, StoreError> {
         let row = self
             .connection

@@ -56,6 +56,12 @@ impl fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
+impl SandboxError {
+    pub(crate) fn is_denied(&self) -> bool {
+        matches!(self, Self::Denied { .. })
+    }
+}
+
 impl From<std::io::Error> for SandboxError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)

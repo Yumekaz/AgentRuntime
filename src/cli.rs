@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::audit;
-use crate::exec::{self, ExecutionError};
+use crate::exec::{self, ExecutionError, ToolAction};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError};
@@ -13,7 +13,7 @@ const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt -
 
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
-const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path>\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text>\n  agentrt tool list --workspace <path> [--path <relative-path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>";
+const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -69,6 +69,9 @@ fn run_command(arguments: Vec<String>) -> ExitCode {
                 Err(StoreError::RunNotFound("simulated crash".to_owned()))
             }
             Err(ExecutionError::Store(error)) => Err(error),
+            Err(ExecutionError::Sandbox(error)) => {
+                Err(StoreError::InvalidStatus(error.to_string()))
+            }
         }
     }) {
         Ok(()) => ExitCode::SUCCESS,
@@ -94,6 +97,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
             ExecutionError::SimulatedCrash { .. } => {
                 StoreError::RunNotFound("unexpected simulated crash".to_owned())
             }
+            ExecutionError::Sandbox(error) => StoreError::InvalidStatus(error.to_string()),
         })?;
         println!("run_id={run_id}");
         println!("status=succeeded");
@@ -182,6 +186,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let mut contents = None;
     let mut read_only = false;
     let mut denied_tool = None;
+    let mut store_path = PathBuf::from(".agentrt/state.db");
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -204,6 +209,13 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
                 contents = Some(match arguments.get(index) {
                     Some(value) => value.clone(),
                     None => return usage_error("--contents requires a value".to_owned()),
+                });
+            }
+            "--store" => {
+                index += 1;
+                store_path = PathBuf::from(match arguments.get(index) {
+                    Some(value) => value,
+                    None => return usage_error("--store requires a value".to_owned()),
                 });
             }
             "--read-only" => read_only = true,
@@ -240,33 +252,48 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let router = ToolRouter::new(policy);
     let relative_path = path.as_deref().unwrap_or(".");
 
-    match command {
-        "read" => match router.read_file(relative_path) {
-            Ok(contents) => {
-                print!("{contents}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => sandbox_error(error),
-        },
+    let action = match command {
+        "read" => ToolAction::ReadFile(relative_path.to_owned()),
         "write" => {
             let Some(contents) = contents else {
                 return usage_error("--contents is required for write".to_owned());
             };
-            match router.write_file(relative_path, &contents) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => sandbox_error(error),
+            ToolAction::WriteFile {
+                path: relative_path.to_owned(),
+                contents,
             }
         }
-        "list" => match router.list_dir(relative_path) {
-            Ok(entries) => {
-                for entry in entries {
-                    println!("{entry}");
-                }
-                ExitCode::SUCCESS
-            }
-            Err(error) => sandbox_error(error),
-        },
+        "list" => ToolAction::ListDir(relative_path.to_owned()),
         _ => unreachable!(),
+    };
+
+    let definitions = StepDefinition::sequence(1);
+    let run_id = new_run_id();
+    let store = match Store::open(&store_path) {
+        Ok(store) => store,
+        Err(error) => return command_error(error),
+    };
+    if let Err(error) = store.create_run(&run_id, &definitions) {
+        return command_error(error);
+    }
+
+    match exec::execute_tool_step(&store, &run_id, &definitions[0], &router, &action) {
+        Ok(output) => {
+            println!("run_id={run_id}");
+            println!("status=succeeded");
+            if !output.is_empty() && command != "write" {
+                println!("output={output}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(ExecutionError::Sandbox(error)) => {
+            eprintln!("run_id={run_id}");
+            sandbox_error(error)
+        }
+        Err(ExecutionError::Store(error)) => command_error(error),
+        Err(ExecutionError::SimulatedCrash { .. }) => {
+            usage_error("unexpected simulated crash in tool step".to_owned())
+        }
     }
 }
 
