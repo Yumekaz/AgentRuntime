@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use crate::audit;
 use crate::exec::{self, ExecutionError};
 use crate::run::{StepDefinition, new_run_id};
+use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -11,6 +12,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt --help";
 
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
+
+const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path>\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text>\n  agentrt tool list --workspace <path> [--path <relative-path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -34,6 +37,7 @@ pub(crate) fn run() -> ExitCode {
         Some("resume") => resume_command(args.collect()),
         Some("status") => status_command(args.collect()),
         Some("audit") => audit_command(args.collect()),
+        Some("tool") => tool_command(args.collect()),
         Some(command) => {
             eprintln!("error: unknown command `{command}`");
             println!();
@@ -165,6 +169,107 @@ fn audit_command(arguments: Vec<String>) -> ExitCode {
     }
 }
 
+fn tool_command(arguments: Vec<String>) -> ExitCode {
+    let Some(command) = arguments.first().map(String::as_str) else {
+        return usage_error(TOOL_USAGE.to_owned());
+    };
+    if !matches!(command, "read" | "write" | "list") {
+        return usage_error(format!("unknown tool command `{command}`\n\n{TOOL_USAGE}"));
+    }
+
+    let mut workspace = None;
+    let mut path = None;
+    let mut contents = None;
+    let mut read_only = false;
+    let mut denied_tool = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--workspace" => {
+                index += 1;
+                workspace = Some(PathBuf::from(match arguments.get(index) {
+                    Some(value) => value,
+                    None => return usage_error("--workspace requires a value".to_owned()),
+                }));
+            }
+            "--path" => {
+                index += 1;
+                path = Some(match arguments.get(index) {
+                    Some(value) => value.clone(),
+                    None => return usage_error("--path requires a value".to_owned()),
+                });
+            }
+            "--contents" => {
+                index += 1;
+                contents = Some(match arguments.get(index) {
+                    Some(value) => value.clone(),
+                    None => return usage_error("--contents requires a value".to_owned()),
+                });
+            }
+            "--read-only" => read_only = true,
+            "--deny-tool" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error("--deny-tool requires a value".to_owned());
+                };
+                denied_tool = Tool::parse(value);
+                if denied_tool.is_none() {
+                    return usage_error(format!("unknown tool `{value}`\n\n{TOOL_USAGE}"));
+                }
+            }
+            "--help" | "-h" => return usage_error(TOOL_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{TOOL_USAGE}")),
+        }
+        index += 1;
+    }
+
+    let Some(workspace) = workspace else {
+        return usage_error("--workspace is required\n\n".to_owned() + TOOL_USAGE);
+    };
+    let policy = match if read_only {
+        Policy::read_only(&workspace)
+    } else {
+        Policy::workspace(&workspace)
+    } {
+        Ok(policy) => match denied_tool {
+            Some(tool) => policy.deny_tool(tool),
+            None => policy,
+        },
+        Err(error) => return sandbox_error(error),
+    };
+    let router = ToolRouter::new(policy);
+    let relative_path = path.as_deref().unwrap_or(".");
+
+    match command {
+        "read" => match router.read_file(relative_path) {
+            Ok(contents) => {
+                print!("{contents}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => sandbox_error(error),
+        },
+        "write" => {
+            let Some(contents) = contents else {
+                return usage_error("--contents is required for write".to_owned());
+            };
+            match router.write_file(relative_path, &contents) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => sandbox_error(error),
+            }
+        }
+        "list" => match router.list_dir(relative_path) {
+            Ok(entries) => {
+                for entry in entries {
+                    println!("{entry}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => sandbox_error(error),
+        },
+        _ => unreachable!(),
+    }
+}
+
 #[derive(Debug)]
 struct Options {
     store: PathBuf,
@@ -255,6 +360,11 @@ fn usage_error(error: String) -> ExitCode {
 }
 
 fn command_error(error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("error: {error}");
+    ExitCode::from(1)
+}
+
+fn sandbox_error(error: SandboxError) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::from(1)
 }

@@ -8,7 +8,7 @@ This repository is being built around one proof: kill a run mid-execution, resta
 
 ## Current status
 
-The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, display the ordered audit event stream, and export a hashed audit bundle. Tool execution, model calls, and eval cases are not implemented yet.
+The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, display the ordered audit event stream, export a hashed audit bundle, and enforce a typed filesystem tool policy. Model calls and eval cases are not implemented yet.
 
 ## Run it
 
@@ -26,7 +26,12 @@ cargo run -- status --store .agentrt/demo.db --run-id <id>
 cargo run -- resume --store .agentrt/demo.db --run-id <id>
 cargo run -- audit --store .agentrt/demo.db --run-id <id>
 cargo run -- audit --store .agentrt/demo.db --run-id <id> --export .agentrt/bundle
+cargo run -- tool list --workspace ./fixtures/workspace
+cargo run -- tool read --workspace ./fixtures/workspace --path input.txt
+cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --contents "safe"
 ```
+
+Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.
 
 ## Scope
 
