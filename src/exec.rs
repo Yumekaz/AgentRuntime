@@ -1,8 +1,8 @@
 //! Deterministic step execution and recovery coordination.
 
 use crate::audit::sha256_hex;
-use crate::run::StepDefinition;
-use crate::sandbox::{SandboxError, ToolRouter};
+use crate::run::{RunStatus, StepDefinition};
+use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError};
 use std::fmt;
 
@@ -70,6 +70,29 @@ pub(crate) fn execute_tool_step(
     router: &ToolRouter,
     action: &ToolAction,
 ) -> Result<String, ExecutionError> {
+    execute_tool_step_with_pause(store, run_id, definition, router, action, 0)
+}
+
+pub(crate) fn execute_tool_step_with_pause(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    router: &ToolRouter,
+    action: &ToolAction,
+    pause_ms: u64,
+) -> Result<String, ExecutionError> {
+    if let Some(stored_step) = store
+        .load_steps(run_id)?
+        .into_iter()
+        .find(|step| step.index == definition.index)
+    {
+        if stored_step.completed {
+            let output = stored_step.output.unwrap_or_default();
+            store.finish_run(run_id)?;
+            return Ok(output);
+        }
+    }
+
     store.mark_running(run_id)?;
     let argument_hash = sha256_hex(action.arguments().as_bytes());
     store.record_event(
@@ -119,9 +142,70 @@ pub(crate) fn execute_tool_step(
             sha256_hex(output.as_bytes())
         ),
     )?;
+    if pause_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+    }
     store.complete_step(run_id, definition.index, &output)?;
     store.finish_run(run_id)?;
     Ok(output)
+}
+
+pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionError> {
+    let run = store.load_run(run_id)?;
+    if run.status == RunStatus::Succeeded {
+        return Ok(());
+    }
+
+    let stored_steps = store.load_steps(run_id)?;
+    for stored_step in &stored_steps {
+        if stored_step.completed {
+            continue;
+        }
+        let Some(spec) = store.load_tool_step(run_id, stored_step.index)? else {
+            continue;
+        };
+
+        let tool = Tool::parse(&spec.tool_name).ok_or_else(|| {
+            ExecutionError::Store(StoreError::InvalidStatus(format!(
+                "unknown persisted tool `{}`",
+                spec.tool_name
+            )))
+        })?;
+        let policy = if spec.read_only {
+            Policy::read_only(&spec.workspace_root)
+        } else {
+            Policy::workspace(&spec.workspace_root)
+        }?;
+        let policy = match spec.denied_tool.as_deref().and_then(Tool::parse) {
+            Some(denied_tool) => policy.deny_tool(denied_tool),
+            None => policy,
+        };
+        let router = ToolRouter::new(policy);
+        let action = match tool {
+            Tool::ReadFile => ToolAction::ReadFile(spec.path),
+            Tool::WriteFile => ToolAction::WriteFile {
+                path: spec.path,
+                contents: spec.contents.ok_or_else(|| {
+                    ExecutionError::Store(StoreError::InvalidStatus(
+                        "persisted write tool has no contents".to_owned(),
+                    ))
+                })?,
+            },
+            Tool::ListDir => ToolAction::ListDir(spec.path),
+        };
+        let definitions = StepDefinition::sequence(run.total_steps);
+        execute_tool_step(
+            store,
+            run_id,
+            &definitions[stored_step.index],
+            &router,
+            &action,
+        )?;
+        return Ok(());
+    }
+
+    let definitions = StepDefinition::sequence(run.total_steps);
+    execute(store, run_id, &definitions, None)
 }
 
 pub(crate) fn execute(

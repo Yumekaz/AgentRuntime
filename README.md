@@ -8,7 +8,7 @@ This repository is being built around one proof: kill a run mid-execution, resta
 
 ## Current status
 
-The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, display the ordered audit event stream, export a hashed audit bundle, and enforce a typed filesystem tool policy. Model calls and eval cases are not implemented yet.
+The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, persist and reconstruct tool actions after a process kill, display the ordered audit event stream, export a hashed audit bundle, and enforce a typed filesystem tool policy. Model calls and eval cases are not implemented yet.
 
 ## Run it
 

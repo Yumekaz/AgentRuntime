@@ -5,7 +5,7 @@ use crate::audit;
 use crate::exec::{self, ExecutionError, ToolAction};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, ToolStepSpec};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -13,7 +13,7 @@ const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt -
 
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
-const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>";
+const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>\n  --pause-ms <milliseconds>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -90,9 +90,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
     };
 
     match Store::open(&options.store).and_then(|store| {
-        let run = store.load_run(&run_id)?;
-        let definitions = StepDefinition::sequence(run.total_steps);
-        exec::execute(&store, &run_id, &definitions, None).map_err(|error| match error {
+        exec::resume_run(&store, &run_id).map_err(|error| match error {
             ExecutionError::Store(error) => error,
             ExecutionError::SimulatedCrash { .. } => {
                 StoreError::RunNotFound("unexpected simulated crash".to_owned())
@@ -187,6 +185,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let mut read_only = false;
     let mut denied_tool = None;
     let mut store_path = PathBuf::from(".agentrt/state.db");
+    let mut pause_ms = 0;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -217,6 +216,16 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
                     Some(value) => value,
                     None => return usage_error("--store requires a value".to_owned()),
                 });
+            }
+            "--pause-ms" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error("--pause-ms requires a value".to_owned());
+                };
+                pause_ms = match value.parse::<u64>() {
+                    Ok(value) => value,
+                    Err(_) => return usage_error("--pause-ms expects an integer".to_owned()),
+                };
             }
             "--read-only" => read_only = true,
             "--deny-tool" => {
@@ -276,8 +285,39 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     if let Err(error) = store.create_run(&run_id, &definitions) {
         return command_error(error);
     }
+    let workspace_root = match std::fs::canonicalize(&workspace) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => return sandbox_error(error.into()),
+    };
+    let tool_name = match command {
+        "read" => "read_file",
+        "write" => "write_file",
+        "list" => "list_dir",
+        _ => unreachable!(),
+    };
+    let spec = ToolStepSpec {
+        workspace_root,
+        tool_name: tool_name.to_owned(),
+        path: relative_path.to_owned(),
+        contents: match &action {
+            ToolAction::WriteFile { contents, .. } => Some(contents.clone()),
+            _ => None,
+        },
+        read_only,
+        denied_tool: denied_tool.map(|tool| tool.name().to_owned()),
+    };
+    if let Err(error) = store.configure_tool_step(&run_id, 0, &spec) {
+        return command_error(error);
+    }
 
-    match exec::execute_tool_step(&store, &run_id, &definitions[0], &router, &action) {
+    match exec::execute_tool_step_with_pause(
+        &store,
+        &run_id,
+        &definitions[0],
+        &router,
+        &action,
+        pause_ms,
+    ) {
         Ok(output) => {
             println!("run_id={run_id}");
             println!("status=succeeded");

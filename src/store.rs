@@ -63,6 +63,16 @@ pub(crate) struct StoredEvent {
     pub(crate) payload: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ToolStepSpec {
+    pub(crate) workspace_root: String,
+    pub(crate) tool_name: String,
+    pub(crate) path: String,
+    pub(crate) contents: Option<String>,
+    pub(crate) read_only: bool,
+    pub(crate) denied_tool: Option<String>,
+}
+
 pub(crate) struct Store {
     connection: Connection,
 }
@@ -106,6 +116,45 @@ impl Store {
 
         append_event(&transaction, run_id, "run.created", None, "")?;
 
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn configure_tool_step(
+        &self,
+        run_id: &str,
+        step_index: usize,
+        spec: &ToolStepSpec,
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let step_exists: Option<i64> = transaction
+            .query_row(
+                "SELECT step_index FROM steps WHERE run_id = ?1 AND step_index = ?2",
+                params![run_id, step_index as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if step_exists.is_none() {
+            return Err(StoreError::RunNotFound(format!(
+                "step {step_index} in run `{run_id}`"
+            )));
+        }
+
+        transaction.execute(
+            "INSERT OR REPLACE INTO tool_steps
+             (run_id, step_index, workspace_root, tool_name, path, contents, read_only, denied_tool)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                run_id,
+                step_index as i64,
+                spec.workspace_root,
+                spec.tool_name,
+                spec.path,
+                spec.contents,
+                spec.read_only as i64,
+                spec.denied_tool,
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -300,6 +349,31 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Sql)
     }
 
+    pub(crate) fn load_tool_step(
+        &self,
+        run_id: &str,
+        step_index: usize,
+    ) -> Result<Option<ToolStepSpec>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT workspace_root, tool_name, path, contents, read_only, denied_tool
+                 FROM tool_steps WHERE run_id = ?1 AND step_index = ?2",
+                params![run_id, step_index as i64],
+                |row| {
+                    Ok(ToolStepSpec {
+                        workspace_root: row.get(0)?,
+                        tool_name: row.get(1)?,
+                        path: row.get(2)?,
+                        contents: row.get(3)?,
+                        read_only: row.get::<_, i64>(4)? != 0,
+                        denied_tool: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::Sql)
+    }
+
     pub(crate) fn load_events(&self, run_id: &str) -> Result<Vec<StoredEvent>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT sequence, event_type, step_index, payload
@@ -344,6 +418,18 @@ impl Store {
                  step_index INTEGER,
                  payload TEXT NOT NULL,
                  occurred_at INTEGER NOT NULL,
+                 FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS tool_steps (
+                 run_id TEXT NOT NULL,
+                 step_index INTEGER NOT NULL,
+                 workspace_root TEXT NOT NULL,
+                 tool_name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 contents TEXT,
+                 read_only INTEGER NOT NULL,
+                 denied_tool TEXT,
+                 PRIMARY KEY (run_id, step_index),
                  FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
              );",
         )?;
