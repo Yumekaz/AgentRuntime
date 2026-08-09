@@ -89,9 +89,9 @@ fn killed_tool_process_resumes_from_persisted_spec() {
         "durable"
     );
 
+    // The runner is disposable. Avoid deleting SQLite files immediately after
+    // the child process exits because Windows file scanners can still hold them.
     drop(connection);
-    std::fs::remove_file(&database).expect("database removes");
-    std::fs::remove_dir_all(&workspace).expect("workspace removes");
 }
 
 fn wait_for_tool_result(database: &PathBuf) -> String {
