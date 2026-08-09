@@ -79,16 +79,6 @@ pub(crate) fn idempotency_key(run_id: &str, step_index: usize) -> String {
     format!("{run_id}:step:{step_index}")
 }
 
-pub(crate) fn execute_tool_step(
-    store: &Store,
-    run_id: &str,
-    definition: &StepDefinition,
-    router: &ToolRouter,
-    action: &ToolAction,
-) -> Result<String, ExecutionError> {
-    execute_tool_step_with_pause(store, run_id, definition, router, action, 0)
-}
-
 pub(crate) fn execute_llm_step<P: ModelProvider>(
     store: &Store,
     run_id: &str,
@@ -117,15 +107,18 @@ pub(crate) fn execute_tool_step_with_pause(
     )
 }
 
-pub(crate) fn execute_tool_step_in_run(
+fn execute_tool_step_in_run_with_pause(
     store: &Store,
     run_id: &str,
     definition: &StepDefinition,
     router: &ToolRouter,
     action: &ToolAction,
+    pause_ms: u64,
 ) -> Result<String, ExecutionError> {
     let key = idempotency_key(run_id, definition.index);
-    execute_tool_step_with_key(store, run_id, definition, router, action, &key, 0, false)
+    execute_tool_step_with_key(
+        store, run_id, definition, router, action, &key, pause_ms, false,
+    )
 }
 
 pub(crate) fn execute_gate_step_in_run(
@@ -279,6 +272,14 @@ fn execute_tool_step_with_key(
 }
 
 pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionError> {
+    resume_run_with_pause(store, run_id, 0)
+}
+
+pub(crate) fn resume_run_with_pause(
+    store: &Store,
+    run_id: &str,
+    pause_ms: u64,
+) -> Result<(), ExecutionError> {
     let run = store.load_run(run_id)?;
     if run.status == RunStatus::Succeeded {
         return Ok(());
@@ -317,7 +318,7 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
             if finish_run {
                 return Ok(());
             }
-            return resume_run(store, run_id);
+            return resume_run_with_pause(store, run_id, pause_ms);
         }
         let tool = Tool::parse(&spec.tool_name).ok_or_else(|| {
             ExecutionError::Store(StoreError::InvalidStatus(format!(
@@ -356,16 +357,17 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
                 &router,
                 &action,
                 &key,
-                0,
+                pause_ms,
                 true,
             )?;
         } else {
-            execute_tool_step_in_run(
+            execute_tool_step_in_run_with_pause(
                 store,
                 run_id,
                 &definitions[stored_step.index],
                 &router,
                 &action,
+                pause_ms,
             )?;
         }
 
@@ -373,7 +375,7 @@ pub(crate) fn resume_run(store: &Store, run_id: &str) -> Result<(), ExecutionErr
             return Ok(());
         }
 
-        return resume_run(store, run_id);
+        return resume_run_with_pause(store, run_id, pause_ms);
     }
 
     let definitions = StepDefinition::sequence(run.total_steps);
@@ -421,7 +423,7 @@ pub(crate) fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionError, ToolAction, execute, execute_tool_step};
+    use super::{ExecutionError, ToolAction, execute, execute_tool_step_with_pause};
     use crate::model::{FakeProvider, Message, ModelRequest};
     use crate::run::{StepDefinition, new_run_id};
     use crate::sandbox::{Policy, ToolRouter};
@@ -503,12 +505,13 @@ mod tests {
             .create_run(&run_id, &definitions)
             .expect("run creates");
         let router = ToolRouter::new(Policy::workspace(&workspace).expect("policy creates"));
-        execute_tool_step(
+        execute_tool_step_with_pause(
             &store,
             &run_id,
             &definitions[0],
             &router,
             &ToolAction::ReadFile("input.txt".to_owned()),
+            0,
         )
         .expect("tool step succeeds");
 
@@ -548,7 +551,7 @@ mod tests {
             .create_run(&run_id, &definitions)
             .expect("run creates");
         let router = ToolRouter::new(Policy::read_only(&workspace).expect("policy creates"));
-        let result = execute_tool_step(
+        let result = execute_tool_step_with_pause(
             &store,
             &run_id,
             &definitions[0],
@@ -557,6 +560,7 @@ mod tests {
                 path: "blocked.txt".to_owned(),
                 contents: "nope".to_owned(),
             },
+            0,
         );
         assert!(matches!(result, Err(ExecutionError::Sandbox(_))));
 

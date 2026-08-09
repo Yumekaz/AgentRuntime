@@ -23,7 +23,7 @@ const MODEL_USAGE: &str =
 
 const GATE_USAGE: &str = "Usage:\n  agentrt gate exists --workspace <path> --path <relative-path>\n  agentrt gate contains --workspace <path> --path <relative-path> --text <expected>";
 
-const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>]";
+const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>] [--run-id <id>] [--pause-ms <milliseconds>]";
 
 const EVAL_USAGE: &str = "Usage:\n  agentrt eval [--break]";
 
@@ -516,10 +516,13 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
     let mut find = None;
     let mut replace = None;
     let mut store_path = PathBuf::from(".agentrt/state.db");
+    let mut run_id = None;
+    let mut pause_ms = 0;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
-            "--workspace" | "--path" | "--find" | "--replace" | "--store" => {
+            "--workspace" | "--path" | "--find" | "--replace" | "--store" | "--run-id"
+            | "--pause-ms" => {
                 let option = arguments[index].clone();
                 index += 1;
                 let Some(value) = arguments.get(index) else {
@@ -531,6 +534,15 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
                     "--find" => find = Some(value.clone()),
                     "--replace" => replace = Some(value.clone()),
                     "--store" => store_path = PathBuf::from(value),
+                    "--run-id" => run_id = Some(value.clone()),
+                    "--pause-ms" => {
+                        pause_ms = match value.parse::<u64>() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return usage_error("--pause-ms expects an integer".to_owned());
+                            }
+                        };
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -553,7 +565,15 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
         return usage_error(format!("--replace is required\n\n{AGENT_USAGE}"));
     };
 
-    match agent::repo_fix(&store_path, &workspace, &path, &find, &replace) {
+    match agent::repo_fix_with_options(
+        &store_path,
+        &workspace,
+        &path,
+        &find,
+        &replace,
+        run_id,
+        pause_ms,
+    ) {
         Ok(result) => {
             println!("run_id={}", result.run_id);
             println!("status=succeeded");

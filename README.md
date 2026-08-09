@@ -34,6 +34,9 @@ cargo run -- agent repo-fix --workspace ./fixtures/workspace --path fixture.txt 
 cargo run -- eval
 # Demonstrate a deliberate regression; this must exit with status 1.
 cargo run -- eval --break
+
+# Full Windows recovery/audit/sandbox/regression demonstration.
+powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 ```
 
 Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.

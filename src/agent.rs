@@ -19,6 +19,18 @@ pub(crate) fn repo_fix(
     find: &str,
     replace: &str,
 ) -> Result<RepoFixResult, ExecutionError> {
+    repo_fix_with_options(store_path, workspace, relative_path, find, replace, None, 0)
+}
+
+pub(crate) fn repo_fix_with_options(
+    store_path: &Path,
+    workspace: &Path,
+    relative_path: &str,
+    find: &str,
+    replace: &str,
+    requested_run_id: Option<String>,
+    pause_ms: u64,
+) -> Result<RepoFixResult, ExecutionError> {
     if find.is_empty() {
         return Err(ExecutionError::GateFailed(
             "repo-fix requires non-empty search text".to_owned(),
@@ -39,7 +51,7 @@ pub(crate) fn repo_fix(
         .to_string_lossy()
         .into_owned();
 
-    let run_id = new_run_id();
+    let run_id = requested_run_id.unwrap_or_else(new_run_id);
     let definitions = StepDefinition::sequence(4);
     let store = Store::open(store_path)?;
     store.create_run(&run_id, &definitions)?;
@@ -97,7 +109,7 @@ pub(crate) fn repo_fix(
         store.configure_tool_step(&run_id, index, spec)?;
     }
 
-    exec::resume_run(&store, &run_id)?;
+    exec::resume_run_with_pause(&store, &run_id, pause_ms)?;
     Ok(RepoFixResult {
         run_id,
         output: replacement,
