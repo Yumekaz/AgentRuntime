@@ -8,13 +8,22 @@ This repository is being built around one proof: kill a run mid-execution, resta
 
 ## Current status
 
-The repository contains the Rust command-line skeleton and module boundaries. Runtime behavior is intentionally not claimed yet.
+The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, and resume an interrupted run without re-executing completed steps. Tool execution, model calls, audit export, and eval cases are not implemented yet.
 
 ## Run it
 
 ```text
 cargo run -- version
 cargo test
+cargo run -- run --store .agentrt/demo.db --steps 4
+```
+
+To exercise recovery, stop after two completed steps and resume the same run:
+
+```text
+cargo run -- run --store .agentrt/demo.db --steps 4 --crash-after 2
+cargo run -- status --store .agentrt/demo.db --run-id <id>
+cargo run -- resume --store .agentrt/demo.db --run-id <id>
 ```
 
 ## Scope

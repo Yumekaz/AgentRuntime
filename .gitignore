@@ -9,6 +9,8 @@
 # Runtime state and exported evidence
 /runs/
 /artifacts/
+/.agentrt/
+/agentrt.db*
 
 # Editor and operating-system noise
 .vscode/
