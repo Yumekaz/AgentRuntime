@@ -33,6 +33,7 @@ cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --con
 
 Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.
 Tool results use persisted idempotency keys: recovery deduplicates effects whose result was recorded before the crash. Arbitrary external side effects cannot honestly be claimed exactly-once without cooperation from the tool.
+The filesystem policy is not a Windows security boundary: it constrains these typed tools, rejects traversal and symlink writes, and bounds write size, but it does not jail arbitrary processes or network traffic.
 
 ## Scope
 

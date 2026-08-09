@@ -13,7 +13,7 @@ const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt -
 
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
-const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>\n  --pause-ms <milliseconds>";
+const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>\n  --max-write-bytes <bytes>\n  --pause-ms <milliseconds>";
 
 pub(crate) fn run() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -186,6 +186,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let mut denied_tool = None;
     let mut store_path = PathBuf::from(".agentrt/state.db");
     let mut pause_ms = 0;
+    let mut max_write_bytes = None;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -227,6 +228,20 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
                     Err(_) => return usage_error("--pause-ms expects an integer".to_owned()),
                 };
             }
+            "--max-write-bytes" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error("--max-write-bytes requires a value".to_owned());
+                };
+                max_write_bytes = match value.parse::<usize>() {
+                    Ok(value) if value > 0 => Some(value),
+                    _ => {
+                        return usage_error(
+                            "--max-write-bytes expects a positive integer".to_owned(),
+                        );
+                    }
+                };
+            }
             "--read-only" => read_only = true,
             "--deny-tool" => {
                 index += 1;
@@ -252,10 +267,16 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     } else {
         Policy::workspace(&workspace)
     } {
-        Ok(policy) => match denied_tool {
-            Some(tool) => policy.deny_tool(tool),
-            None => policy,
-        },
+        Ok(policy) => {
+            let policy = match max_write_bytes {
+                Some(limit) => policy.with_max_write_bytes(limit),
+                None => policy,
+            };
+            match denied_tool {
+                Some(tool) => policy.deny_tool(tool),
+                None => policy,
+            }
+        }
         Err(error) => return sandbox_error(error),
     };
     let router = ToolRouter::new(policy);

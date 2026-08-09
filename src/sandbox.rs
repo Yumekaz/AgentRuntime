@@ -73,6 +73,7 @@ pub(crate) struct Policy {
     root: PathBuf,
     allowed_tools: HashSet<Tool>,
     allow_write: bool,
+    max_write_bytes: usize,
 }
 
 impl Policy {
@@ -86,6 +87,7 @@ impl Policy {
             root,
             allowed_tools: HashSet::from([Tool::ReadFile, Tool::WriteFile, Tool::ListDir]),
             allow_write: true,
+            max_write_bytes: 1024 * 1024,
         })
     }
 
@@ -98,6 +100,11 @@ impl Policy {
 
     pub(crate) fn deny_tool(mut self, tool: Tool) -> Self {
         self.allowed_tools.remove(&tool);
+        self
+    }
+
+    pub(crate) fn with_max_write_bytes(mut self, max_write_bytes: usize) -> Self {
+        self.max_write_bytes = max_write_bytes;
         self
     }
 }
@@ -126,6 +133,15 @@ impl ToolRouter {
         if !self.policy.allow_write {
             return Err(SandboxError::Denied {
                 rule: "writes are disabled by policy".to_owned(),
+                attempted: PathBuf::from(relative_path),
+            });
+        }
+        if contents.len() > self.policy.max_write_bytes {
+            return Err(SandboxError::Denied {
+                rule: format!(
+                    "write exceeds maximum size of {} bytes",
+                    self.policy.max_write_bytes
+                ),
                 attempted: PathBuf::from(relative_path),
             });
         }
@@ -177,6 +193,14 @@ impl ToolRouter {
             rule: "write target has no valid parent".to_owned(),
             attempted: candidate.clone(),
         })?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&candidate) {
+            if metadata.file_type().is_symlink() {
+                return Err(SandboxError::Denied {
+                    rule: "writing through symlinks is disabled".to_owned(),
+                    attempted: PathBuf::from(relative_path),
+                });
+            }
+        }
         let resolved_parent = std::fs::canonicalize(parent)?;
         self.ensure_inside_root(&resolved_parent, relative_path)?;
         Ok(resolved_parent.join(file_name))
@@ -264,6 +288,16 @@ mod tests {
             std::fs::read_to_string(&outside).expect("outside reads"),
             "must remain"
         );
+
+        let limited_router = ToolRouter::new(
+            Policy::workspace(&root)
+                .expect("policy creates")
+                .with_max_write_bytes(3),
+        );
+        assert!(matches!(
+            limited_router.write_file("too-large.txt", "four"),
+            Err(SandboxError::Denied { .. })
+        ));
 
         let denied_router = ToolRouter::new(
             Policy::workspace(&root)
