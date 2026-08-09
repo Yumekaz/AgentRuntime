@@ -8,7 +8,7 @@ This repository is being built around one proof: kill a run mid-execution, resta
 
 ## Current status
 
-The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, and display the ordered audit event stream. Tool execution, model calls, exportable audit bundles, and eval cases are not implemented yet.
+The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, display the ordered audit event stream, and export a hashed audit bundle. Tool execution, model calls, and eval cases are not implemented yet.
 
 ## Run it
 
@@ -25,6 +25,7 @@ cargo run -- run --store .agentrt/demo.db --steps 4 --crash-after 2
 cargo run -- status --store .agentrt/demo.db --run-id <id>
 cargo run -- resume --store .agentrt/demo.db --run-id <id>
 cargo run -- audit --store .agentrt/demo.db --run-id <id>
+cargo run -- audit --store .agentrt/demo.db --run-id <id> --export .agentrt/bundle
 ```
 
 ## Scope

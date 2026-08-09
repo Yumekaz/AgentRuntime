@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::audit;
 use crate::exec::{self, ExecutionError};
 use crate::run::{StepDefinition, new_run_id};
 use crate::store::{Store, StoreError};
@@ -43,7 +44,7 @@ pub(crate) fn run() -> ExitCode {
 }
 
 fn run_command(arguments: Vec<String>) -> ExitCode {
-    let options = match parse_options(arguments, true) {
+    let options = match parse_options(arguments, true, false) {
         Ok(options) => options,
         Err(error) => return usage_error(error),
     };
@@ -73,7 +74,7 @@ fn run_command(arguments: Vec<String>) -> ExitCode {
 }
 
 fn resume_command(arguments: Vec<String>) -> ExitCode {
-    let options = match parse_options(arguments, false) {
+    let options = match parse_options(arguments, false, false) {
         Ok(options) => options,
         Err(error) => return usage_error(error),
     };
@@ -100,7 +101,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
 }
 
 fn status_command(arguments: Vec<String>) -> ExitCode {
-    let options = match parse_options(arguments, false) {
+    let options = match parse_options(arguments, false, false) {
         Ok(options) => options,
         Err(error) => return usage_error(error),
     };
@@ -121,7 +122,7 @@ fn status_command(arguments: Vec<String>) -> ExitCode {
 }
 
 fn audit_command(arguments: Vec<String>) -> ExitCode {
-    let options = match parse_options(arguments, false) {
+    let options = match parse_options(arguments, false, true) {
         Ok(options) => options,
         Err(error) => return usage_error(error),
     };
@@ -129,23 +130,37 @@ fn audit_command(arguments: Vec<String>) -> ExitCode {
         return usage_error("--run-id is required for audit".to_owned());
     };
 
-    match Store::open(&options.store).and_then(|store| {
-        let events = store.load_events(&run_id)?;
-        for event in events {
-            let step = event
-                .step_index
-                .map(|index| format!(" step={index}"))
-                .unwrap_or_default();
-            let payload = if event.payload.is_empty() {
-                String::new()
-            } else {
-                format!(" payload={}", event.payload)
-            };
-            println!("{} {}{}{}", event.sequence, event.event_type, step, payload);
+    let store = match Store::open(&options.store) {
+        Ok(store) => store,
+        Err(error) => return command_error(error),
+    };
+
+    if let Some(destination) = options.export.as_deref() {
+        return match audit::export(&store, &run_id, destination) {
+            Ok(()) => {
+                println!("exported={}", destination.display());
+                ExitCode::SUCCESS
+            }
+            Err(error) => command_error(error),
+        };
+    }
+
+    match store.load_events(&run_id) {
+        Ok(events) => {
+            for event in events {
+                let step = event
+                    .step_index
+                    .map(|index| format!(" step={index}"))
+                    .unwrap_or_default();
+                let payload = if event.payload.is_empty() {
+                    String::new()
+                } else {
+                    format!(" payload={}", event.payload)
+                };
+                println!("{} {}{}{}", event.sequence, event.event_type, step, payload);
+            }
+            ExitCode::SUCCESS
         }
-        Ok(())
-    }) {
-        Ok(()) => ExitCode::SUCCESS,
         Err(error) => command_error(error),
     }
 }
@@ -156,14 +171,20 @@ struct Options {
     run_id: Option<String>,
     steps: usize,
     crash_after: Option<usize>,
+    export: Option<PathBuf>,
 }
 
-fn parse_options(arguments: Vec<String>, allow_run_options: bool) -> Result<Options, String> {
+fn parse_options(
+    arguments: Vec<String>,
+    allow_run_options: bool,
+    allow_export: bool,
+) -> Result<Options, String> {
     let mut options = Options {
         store: PathBuf::from(".agentrt/state.db"),
         run_id: None,
         steps: 4,
         crash_after: None,
+        export: None,
     };
     let mut index = 0;
 
@@ -189,6 +210,10 @@ fn parse_options(arguments: Vec<String>, allow_run_options: bool) -> Result<Opti
                     required_value(&arguments, index, argument)?,
                     argument,
                 )?);
+            }
+            "--export" if allow_export => {
+                index += 1;
+                options.export = Some(PathBuf::from(required_value(&arguments, index, argument)?));
             }
             "--help" | "-h" => return Err(RUN_USAGE.to_owned()),
             other => return Err(format!("unknown option `{other}`\n\n{RUN_USAGE}")),
@@ -229,7 +254,7 @@ fn usage_error(error: String) -> ExitCode {
     ExitCode::from(2)
 }
 
-fn command_error(error: StoreError) -> ExitCode {
+fn command_error(error: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::from(1)
 }
