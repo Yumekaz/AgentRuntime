@@ -16,7 +16,7 @@ const USAGE: &str = "Usage:\n  agentrt version\n  agentrt --version\n  agentrt -
 
 const RUN_USAGE: &str = "Usage:\n  agentrt run [--store <path>] [--steps <count>] [--crash-after <count>]\n  agentrt resume --run-id <id> [--store <path>]\n  agentrt status --run-id <id> [--store <path>]\n  agentrt audit --run-id <id> [--store <path>]";
 
-const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\nOptions:\n  --read-only\n  --deny-tool <read_file|write_file|list_dir>\n  --max-write-bytes <bytes>\n  --pause-ms <milliseconds>";
+const TOOL_USAGE: &str = "Usage:\n  agentrt tool read --workspace <path> --path <relative-path> [--store <path>]\n  agentrt tool write --workspace <path> --path <relative-path> --contents <text> [--store <path>]\n  agentrt tool list --workspace <path> [--path <relative-path>] [--store <path>]\n  agentrt tool run-tests --workspace <path> [--store <path>]\nOptions:\n  --policy <json-file>\n  --read-only\n  --deny-tool <read_file|write_file|list_dir|run_tests>\n  --max-write-bytes <bytes>\n  --pause-ms <milliseconds>";
 
 const MODEL_USAGE: &str =
     "Usage:\n  agentrt model fake --store <path> --model <name> --prompt <text> --response <text>";
@@ -198,7 +198,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let Some(command) = arguments.first().map(String::as_str) else {
         return usage_error(TOOL_USAGE.to_owned());
     };
-    if !matches!(command, "read" | "write" | "list") {
+    if !matches!(command, "read" | "write" | "list" | "run-tests") {
         return usage_error(format!("unknown tool command `{command}`\n\n{TOOL_USAGE}"));
     }
 
@@ -207,6 +207,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let mut contents = None;
     let mut read_only = false;
     let mut denied_tool = None;
+    let mut policy_path = None;
     let mut store_path = PathBuf::from(".agentrt/state.db");
     let mut pause_ms = 0;
     let mut max_write_bytes = None;
@@ -265,6 +266,13 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
                     }
                 };
             }
+            "--policy" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error("--policy requires a value".to_owned());
+                };
+                policy_path = Some(PathBuf::from(value));
+            }
             "--read-only" => read_only = true,
             "--deny-tool" => {
                 index += 1;
@@ -285,7 +293,9 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
     let Some(workspace) = workspace else {
         return usage_error("--workspace is required\n\n".to_owned() + TOOL_USAGE);
     };
-    let policy = match if read_only {
+    let policy = match if let Some(policy_path) = policy_path {
+        Policy::from_file(&workspace, policy_path)
+    } else if read_only {
         Policy::read_only(&workspace)
     } else {
         Policy::workspace(&workspace)
@@ -317,6 +327,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
             }
         }
         "list" => ToolAction::ListDir(relative_path.to_owned()),
+        "run-tests" => ToolAction::RunTests,
         _ => unreachable!(),
     };
 
@@ -337,6 +348,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
         "read" => "read_file",
         "write" => "write_file",
         "list" => "list_dir",
+        "run-tests" => "run_tests",
         _ => unreachable!(),
     };
     let spec = ToolStepSpec {

@@ -64,6 +64,7 @@ pub(crate) enum ToolAction {
     ReadFile(String),
     WriteFile { path: String, contents: String },
     ListDir(String),
+    RunTests,
 }
 
 impl ToolAction {
@@ -72,6 +73,7 @@ impl ToolAction {
             Self::ReadFile(_) => "read_file",
             Self::WriteFile { .. } => "write_file",
             Self::ListDir(_) => "list_dir",
+            Self::RunTests => "run_tests",
         }
     }
 
@@ -79,6 +81,7 @@ impl ToolAction {
         match self {
             Self::ReadFile(path) | Self::ListDir(path) => path.clone(),
             Self::WriteFile { path, contents } => format!("{path}\n{contents}"),
+            Self::RunTests => "cargo test --offline -- --nocapture".to_owned(),
         }
     }
 }
@@ -259,6 +262,7 @@ fn execute_tool_step_with_key(
             .write_file(path, contents)
             .map(|()| "written".to_owned()),
         ToolAction::ListDir(path) => router.list_dir(path).map(|entries| entries.join("\n")),
+        ToolAction::RunTests => router.run_tests(),
     };
 
     let output = match result {
@@ -380,6 +384,7 @@ pub(crate) fn resume_run_with_pause(
                 })?,
             },
             Tool::ListDir => ToolAction::ListDir(spec.path),
+            Tool::RunTests => ToolAction::RunTests,
         };
         if finish_run {
             let key = idempotency_key(run_id, stored_step.index);

@@ -145,7 +145,11 @@ impl fmt::Display for ModelError {
             }
             Self::Http(message) => write!(formatter, "model HTTP error: {message}"),
             Self::Provider { status, body } => {
-                write!(formatter, "model provider returned HTTP {status}: {body}")
+                write!(
+                    formatter,
+                    "model provider failure [{}] HTTP {status}: {body}",
+                    provider_failure_class(*status, body)
+                )
             }
             Self::Decode(message) => write!(formatter, "model response decode error: {message}"),
             Self::Audit(error) => write!(formatter, "model audit error: {error}"),
@@ -498,6 +502,16 @@ fn redact_text(value: &str) -> String {
         .replace("token=", "token=[REDACTED]")
 }
 
+fn provider_failure_class(status: u16, body: &str) -> &'static str {
+    match status {
+        401 | 403 => "auth",
+        408 | 504 => "timeout",
+        429 if body.to_ascii_lowercase().contains("quota") => "quota_exhausted",
+        429 => "rate_limited",
+        _ => "provider_error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AgentPlan, FakeProvider, Message, ModelRequest, PlanAction, complete_with_audit};
@@ -579,5 +593,22 @@ mod tests {
             }"#,
         );
         assert!(matches!(result, Err(super::PlanError::Invalid(_))));
+    }
+
+    #[test]
+    fn provider_failures_are_classified_without_credentials() {
+        assert_eq!(super::provider_failure_class(401, "bad key"), "auth");
+        assert_eq!(
+            super::provider_failure_class(429, "quota exceeded"),
+            "quota_exhausted"
+        );
+        assert_eq!(
+            super::provider_failure_class(429, "slow down"),
+            "rate_limited"
+        );
+        assert_eq!(
+            super::provider_failure_class(503, "temporary"),
+            "provider_error"
+        );
     }
 }

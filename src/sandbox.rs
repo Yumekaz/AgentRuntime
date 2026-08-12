@@ -1,5 +1,6 @@
 //! Typed filesystem tools and constrained execution boundaries.
 
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -9,6 +10,7 @@ pub(crate) enum Tool {
     ReadFile,
     WriteFile,
     ListDir,
+    RunTests,
 }
 
 impl Tool {
@@ -17,6 +19,7 @@ impl Tool {
             Self::ReadFile => "read_file",
             Self::WriteFile => "write_file",
             Self::ListDir => "list_dir",
+            Self::RunTests => "run_tests",
         }
     }
 
@@ -25,6 +28,7 @@ impl Tool {
             "read_file" => Some(Self::ReadFile),
             "write_file" => Some(Self::WriteFile),
             "list_dir" => Some(Self::ListDir),
+            "run_tests" => Some(Self::RunTests),
             _ => None,
         }
     }
@@ -76,6 +80,13 @@ pub(crate) struct Policy {
     max_write_bytes: usize,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct PolicyConfig {
+    pub(crate) allow: Option<Vec<String>>,
+    pub(crate) allow_write: Option<bool>,
+    pub(crate) max_write_bytes: Option<usize>,
+}
+
 impl Policy {
     pub(crate) fn workspace(root: impl AsRef<Path>) -> Result<Self, SandboxError> {
         let root = std::fs::canonicalize(root.as_ref())?;
@@ -89,6 +100,47 @@ impl Policy {
             allow_write: true,
             max_write_bytes: 1024 * 1024,
         })
+    }
+
+    pub(crate) fn from_file(
+        root: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, SandboxError> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: PolicyConfig =
+            serde_json::from_str(&contents).map_err(|error| SandboxError::Denied {
+                rule: format!("invalid policy configuration: {error}"),
+                attempted: PathBuf::from("policy"),
+            })?;
+        let mut policy = Self::workspace(root)?;
+        if let Some(allow) = config.allow {
+            policy.allowed_tools.clear();
+            for name in allow {
+                let Some(tool) = Tool::parse(&name) else {
+                    return Err(SandboxError::Denied {
+                        rule: format!("unknown tool `{name}` in policy"),
+                        attempted: PathBuf::from("policy"),
+                    });
+                };
+                policy.allowed_tools.insert(tool);
+            }
+        }
+        if let Some(allow_write) = config.allow_write {
+            policy.allow_write = allow_write;
+            if !allow_write {
+                policy.allowed_tools.remove(&Tool::WriteFile);
+            }
+        }
+        if let Some(limit) = config.max_write_bytes {
+            if limit == 0 {
+                return Err(SandboxError::Denied {
+                    rule: "max_write_bytes must be positive".to_owned(),
+                    attempted: PathBuf::from("policy"),
+                });
+            }
+            policy.max_write_bytes = limit;
+        }
+        Ok(policy)
     }
 
     pub(crate) fn read_only(root: impl AsRef<Path>) -> Result<Self, SandboxError> {
@@ -188,6 +240,53 @@ impl ToolRouter {
             .collect::<Result<Vec<_>, _>>()?;
         entries.sort();
         Ok(entries)
+    }
+
+    pub(crate) fn run_tests(&self) -> Result<String, SandboxError> {
+        self.require_tool(Tool::RunTests, ".")?;
+        let mut child = std::process::Command::new("cargo")
+            .args([
+                "test",
+                "--offline",
+                "--target-dir",
+                ".agentrt-test-target",
+                "--",
+                "--nocapture",
+            ])
+            .current_dir(&self.policy.root)
+            .env_remove("GEMINI_API_KEY")
+            .env_remove("AGENTRT_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill()?;
+                return Err(SandboxError::Denied {
+                    rule: "run_tests exceeded 180 second timeout".to_owned(),
+                    attempted: PathBuf::from("cargo test"),
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let output = child.wait_with_output()?;
+        let mut combined = output.stdout;
+        combined.extend(output.stderr);
+        let text = String::from_utf8_lossy(&combined);
+        let bounded = text.chars().take(64 * 1024).collect::<String>();
+        if output.status.success() {
+            Ok(bounded)
+        } else {
+            Err(SandboxError::Denied {
+                rule: format!("tests failed: {}", bounded.trim()),
+                attempted: PathBuf::from("cargo test"),
+            })
+        }
     }
 
     fn require_tool(&self, tool: Tool, attempted: &str) -> Result<(), SandboxError> {
