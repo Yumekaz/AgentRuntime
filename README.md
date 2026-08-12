@@ -33,7 +33,7 @@ cargo run -- model fake --store .agentrt/model.db --model fake-model --prompt "s
 cargo run -- agent repo-fix --workspace ./fixtures/workspace --path fixture.txt --find "status=broken" --replace "status=fixed" --store .agentrt/agent.db
 cargo run -- agent repo-fix-model --workspace ./fixtures/workspace --prompt "repair fixture" --response-file ./fixtures/evals/model-plan/plan.json --store .agentrt/model-agent.db
 # Live Gemini 2.5 Flash planning; put GEMINI_API_KEY in the ignored .env file first.
-cargo run -- agent repo-fix-model --provider gemini --model gemini-2.5-flash --workspace ./fixtures/workspace --prompt "repair fixture" --store .agentrt/gemini-agent.db
+cargo run -- agent repo-fix-model --provider gemini --model gemini-3.5-flash --workspace ./fixtures/workspace --prompt "repair fixture" --store .agentrt/gemini-agent.db
 cargo run -- eval
 # Demonstrate a deliberate regression; this must exit with status 1.
 cargo run -- eval --break

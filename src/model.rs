@@ -269,10 +269,17 @@ impl ModelProvider for GeminiProvider {
                         });
                     }
                 }
-                Err(_error) if attempt == self.max_retries => {
-                    return Err(ModelError::Http(
-                        "Gemini request failed after retries".to_owned(),
-                    ));
+                Err(error) if attempt == self.max_retries => {
+                    return Err(ModelError::Http(format!(
+                        "Gemini request failed after retries ({})",
+                        if error.is_timeout() {
+                            "timeout"
+                        } else if error.is_connect() {
+                            "connect"
+                        } else {
+                            "transport"
+                        }
+                    )));
                 }
                 Err(_) => {}
             }
