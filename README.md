@@ -1,63 +1,175 @@
 # AgentRT
 
-AgentRT is a systems-grade execution runtime for multi-step LLM work:
+AgentRT is a local-first execution runtime for multi-step LLM work.
 
-> durable across crashes, constrained when it uses tools, reconstructable from an audit trail, and measurable through regression evals.
+It treats an agent run like a durable workflow:
 
-This repository is being built around one proof: kill a run mid-execution, restart it, and show that it resumes from the last durable checkpoint without silently repeating completed work.
+- steps are persisted in SQLite and can resume after a process kill;
+- filesystem tools are typed, policy-controlled, and audited;
+- model plans are validated before they can mutate a workspace;
+- every important decision is recorded in an exportable audit bundle;
+- deterministic evals run through the same executor and fail CI on regression.
 
-## Current status
+The central proof is simple: kill a run after a side effect is durably recorded, resume it, and show that the effect is not silently repeated.
 
-The runtime can create deterministic pure-step runs in SQLite, persist a checkpoint after each completed step, report progress, resume an interrupted run without re-executing completed steps, persist and reconstruct tool actions after a process kill, display the ordered audit event stream, export a hashed audit bundle, enforce a typed filesystem tool policy, provide fake/OpenAI-compatible model providers with audited calls, and run a reference repo-fix workflow whose read, write, verify-read, and gate steps are durable. The model-driven variant requires a versioned JSON plan, validates it against the sandbox before mutation, persists the planning result, and audits rejected plans.
+## Quick start
 
-## Run it
+Requirements: Rust stable and Cargo.
 
-```text
-cargo run -- version
+```powershell
 cargo test
-cargo run -- run --store .agentrt/demo.db --steps 4
+cargo run -- version
+cargo run -- eval
 ```
 
-To exercise recovery, stop after two completed steps and resume the same run:
+Run the complete recovery demonstration:
 
-```text
-cargo run -- run --store .agentrt/demo.db --steps 4 --crash-after 2
-cargo run -- status --store .agentrt/demo.db --run-id <id>
-cargo run -- resume --store .agentrt/demo.db --run-id <id>
-cargo run -- audit --store .agentrt/demo.db --run-id <id>
-cargo run -- audit --store .agentrt/demo.db --run-id <id> --export .agentrt/bundle
-cargo run -- tool list --workspace ./fixtures/workspace
-cargo run -- tool read --workspace ./fixtures/workspace --path input.txt
-cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --contents "safe"
-cargo run -- model fake --store .agentrt/model.db --model fake-model --prompt "summarize fixture" --response "fixture summary"
-cargo run -- agent repo-fix --workspace ./fixtures/workspace --path fixture.txt --find "status=broken" --replace "status=fixed" --store .agentrt/agent.db
-cargo run -- agent repo-fix-model --workspace ./fixtures/workspace --prompt "repair fixture" --response-file ./fixtures/evals/model-plan/plan.json --store .agentrt/model-agent.db
-# Live Gemini 2.5 Flash planning; put GEMINI_API_KEY in the ignored .env file first.
-cargo run -- agent repo-fix-model --provider gemini --model gemini-3.5-flash --workspace ./fixtures/workspace --prompt "repair fixture" --store .agentrt/gemini-agent.db
-cargo run -- eval
-# Demonstrate a deliberate regression; this must exit with status 1.
-cargo run -- eval --break
-
-# Full recovery/model-plan/audit/sandbox/regression demonstration.
+```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\demo.ps1
 ```
 
-Filesystem tools accept only relative paths within the declared workspace. Raw shell execution is not exposed by this interface.
-Tool results use persisted idempotency keys: recovery deduplicates effects whose result was recorded before the crash. Arbitrary external side effects cannot honestly be claimed exactly-once without cooperation from the tool.
-The filesystem policy is not a Windows security boundary: it constrains these typed tools, rejects traversal and symlink writes, and bounds write size, but it does not jail arbitrary processes or network traffic.
+The demo performs a model-plan workflow, kills it during tool execution, resumes the same run, exports the audit trail, proves a sandbox denial, and intentionally breaks an eval. The final eval failure is expected; the script itself exits successfully only when it observes that failure correctly.
 
-The model adapter supports deterministic `FakeProvider` tests, Gemini `generateContent`, and OpenAI-compatible chat-completions endpoints over HTTPS. Provider credentials are read from local environment configuration, never included in audit payloads, and never printed by provider errors; request content is structurally redacted and response content is hashed.
+## What is implemented
 
-## Scope
+### Durable execution
 
-The initial runtime targets a single local machine. It is not a hosted agent platform, an IDE, a multi-node workflow cluster, or a model-training project.
+Runs and steps are persisted in SQLite. Each completed step gets a checkpoint and an idempotency key. Recovery reconstructs persisted tool specifications, resumes pending work, and emits a deduplication event when a recorded result is encountered again.
 
-See [PROJECT.md](PROJECT.md) for the product contract, acceptance criteria, and implementation boundaries.
+### Constrained tools
 
-## Language decision
+The runtime exposes typed tools rather than arbitrary shell access:
 
-Rust is the runtime language because it gives the core explicit ownership and failure handling.
-It produces a small single-binary CLI suitable for local-first distribution.
-Its type system makes run, step, checkpoint, and policy states harder to confuse accidentally.
-The standard library is enough for the initial executable, keeping the foundation dependency-light.
-The tradeoff is a higher implementation cost, accepted in exchange for stronger systems credibility.
+- `read_file`
+- `write_file`
+- `list_dir`
+- `run_tests`
+
+Paths must remain inside the declared workspace. Traversal, symlink writes, denied tools, read-only writes, and oversized writes are rejected and audited. `run_tests` is restricted to offline Cargo tests, has a bounded timeout, uses a separate target directory, and removes API credentials from its child environment.
+
+The filesystem policy is not a Windows security boundary. It constrains AgentRT’s typed tools; it does not jail arbitrary processes or network traffic.
+
+### Model-driven planning
+
+The reference `repo-fix-model` workflow asks a provider for a versioned JSON plan. AgentRT validates the schema, restricts the actions to the workspace policy, persists the plan, and only then executes reads, writes, verification, and gates.
+
+Available providers:
+
+- deterministic `FakeProvider` for tests and replayable demos;
+- Gemini `generateContent`;
+- OpenAI-compatible chat-completions endpoints.
+
+Provider requests are audited with structural redaction. Response content is represented by hashes in the audit trail. Credentials are loaded from environment configuration and are never committed.
+
+## Useful commands
+
+Create a small private workspace:
+
+```powershell
+New-Item -ItemType Directory -Force .agentrt\workspace | Out-Null
+Set-Content .agentrt\workspace\input.txt "status=broken"
+```
+
+Run and recover a deterministic workflow:
+
+```powershell
+cargo run -- run --store .agentrt\run.db --steps 4 --crash-after 2
+cargo run -- status --store .agentrt\run.db --run-id <run-id>
+cargo run -- resume --store .agentrt\run.db --run-id <run-id>
+cargo run -- audit --store .agentrt\run.db --run-id <run-id>
+cargo run -- audit --store .agentrt\run.db --run-id <run-id> --export .agentrt\bundle
+```
+
+Use a typed tool with an explicit policy:
+
+```powershell
+cargo run -- tool read --workspace .agentrt\workspace --path input.txt --policy fixtures\policy.json
+cargo run -- tool write --workspace .agentrt\workspace --path output.txt --contents safe --policy fixtures\policy.json
+cargo run -- tool run-tests --workspace . --policy fixtures\policy.json
+```
+
+Run the deterministic reference agent:
+
+```powershell
+cargo run -- agent repo-fix --workspace .agentrt\workspace --path input.txt --find status=broken --replace status=fixed --store .agentrt\agent.db
+```
+
+Run the model-plan workflow from a recorded response:
+
+```powershell
+cargo run -- agent repo-fix-model `
+  --workspace .agentrt\workspace `
+  --prompt repair-fixture `
+  --response-file .\fixtures\evals\model-plan\plan.json `
+  --store .agentrt\model-agent.db
+```
+
+## Live Gemini usage
+
+Put the key in the ignored local `.env` file, never in source or command history:
+
+```text
+GEMINI_API_KEY=your-key
+GEMINI_MODEL=gemini-3.5-flash
+```
+
+Then run one model-planning call:
+
+```powershell
+cargo run -- agent repo-fix-model `
+  --provider gemini `
+  --model gemini-3.5-flash `
+  --workspace .agentrt\workspace `
+  --prompt "Return only a valid JSON repair plan for input.txt" `
+  --store .agentrt\gemini.db
+```
+
+Live providers are optional. Tests and CI use deterministic responses and do not require an API key.
+
+## Evals and CI
+
+The built-in suite covers:
+
+- the deterministic repo-fix workflow;
+- model-plan execution through gates;
+- malformed plan rejection;
+- traversal rejection;
+- read-only policy denial;
+- intentional regression failure.
+
+```powershell
+cargo run -- eval
+cargo run -- eval --break   # must exit non-zero
+```
+
+GitHub Actions runs the locked Rust test suite and the eval command on Linux. Local Windows tests are also supported; toolchain/linker availability can affect native Windows builds.
+
+## Audit bundles
+
+Exported bundles contain run metadata, ordered JSONL events, and hashed evidence. The event stream records run lifecycle, checkpoints, model requests/responses, tool invocations/results, sandbox denials, plan validation, and gate outcomes.
+
+This makes it possible to answer what the agent did, in what order, with which tools, under which policy, and where it failed—without reading the implementation first.
+
+## Architecture
+
+```text
+CLI
+ └─ Run manager
+     ├─ Durable SQLite store
+     ├─ Step executor and recovery
+     ├─ Model provider adapter
+     ├─ Tool router → workspace policy
+     ├─ Gate engine
+     └─ Append-only audit events → export bundle
+            └─ Eval harness uses the same executor
+```
+
+## Scope and limitations
+
+AgentRT is a single-machine runtime prototype focused on durable, inspectable execution. It is not a hosted agent platform, IDE, multi-node workflow cluster, container boundary, or model-training system.
+
+It does not claim exactly-once behavior for arbitrary external side effects, bit-identical outputs across LLM providers, or a security boundary around unrestricted host processes. Those boundaries are deliberate and visible in the audit and documentation.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
