@@ -10,9 +10,10 @@ $bundle = Join-Path $demoRoot "audit-bundle"
 $stdout = Join-Path $demoRoot "agent.stdout.log"
 $stderr = Join-Path $demoRoot "agent.stderr.log"
 $runId = "demo-recovery-$PID"
+$plan = Join-Path $repoRoot "fixtures\evals\model-plan\plan.json"
 
 New-Item -ItemType Directory -Path $workspace -Force | Out-Null
-Set-Content -LiteralPath (Join-Path $workspace "fixture.txt") -Value "status=broken`n" -NoNewline
+Set-Content -LiteralPath (Join-Path $workspace "input.txt") -Value "status=broken`n" -NoNewline
 
 Push-Location $repoRoot
 try {
@@ -20,11 +21,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
     $arguments = @(
-        "agent", "repo-fix",
+        "agent", "repo-fix-model",
         "--workspace", $workspace,
-        "--path", "fixture.txt",
-        "--find", "status=broken",
-        "--replace", "status=fixed",
+        "--prompt", "repair-fixture",
+        "--response-file", $plan,
         "--store", $store,
         "--run-id", $runId,
         "--pause-ms", "3000"
@@ -53,6 +53,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "audit export failed" }
     $events = Get-Content -LiteralPath (Join-Path $bundle "events.jsonl") -Raw
     if ($events -notmatch "tool.deduplicated") { throw "audit did not prove deduplication" }
+    if ($events -notmatch "llm.request" -or $events -notmatch "agent.plan") { throw "audit did not prove model planning" }
 
     & $binary tool write --workspace $workspace --path denied.txt --contents blocked --store $denialStore --read-only | Out-Host
     if ($LASTEXITCODE -eq 0) { throw "sandbox denial unexpectedly succeeded" }

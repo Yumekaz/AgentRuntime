@@ -23,7 +23,7 @@ const MODEL_USAGE: &str =
 
 const GATE_USAGE: &str = "Usage:\n  agentrt gate exists --workspace <path> --path <relative-path>\n  agentrt gate contains --workspace <path> --path <relative-path> --text <expected>";
 
-const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>] [--run-id <id>] [--pause-ms <milliseconds>]";
+const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> --path <relative-path> --find <text> --replace <text> [--store <path>] [--run-id <id>] [--pause-ms <milliseconds>]\n  agentrt agent repo-fix-model --workspace <path> --prompt <text> (--response <plan-json>|--response-file <path>) [--store <path>] [--run-id <id>] [--pause-ms <milliseconds>]";
 
 const EVAL_USAGE: &str = "Usage:\n  agentrt eval [--break]";
 
@@ -89,6 +89,7 @@ fn run_command(arguments: Vec<String>) -> ExitCode {
                 Err(StoreError::InvalidStatus(error.to_string()))
             }
             Err(ExecutionError::Model(error)) => Err(StoreError::InvalidStatus(error.to_string())),
+            Err(ExecutionError::Plan(error)) => Err(StoreError::InvalidStatus(error)),
             Err(ExecutionError::GateFailed(error)) => Err(StoreError::InvalidStatus(error)),
         }
     }) {
@@ -115,6 +116,7 @@ fn resume_command(arguments: Vec<String>) -> ExitCode {
             }
             ExecutionError::Sandbox(error) => StoreError::InvalidStatus(error.to_string()),
             ExecutionError::Model(error) => StoreError::InvalidStatus(error.to_string()),
+            ExecutionError::Plan(error) => StoreError::InvalidStatus(error),
             ExecutionError::GateFailed(error) => StoreError::InvalidStatus(error),
         })?;
         println!("run_id={run_id}");
@@ -374,6 +376,7 @@ fn tool_command(arguments: Vec<String>) -> ExitCode {
         }
         Err(ExecutionError::Store(error)) => command_error(error),
         Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::Plan(error)) => command_error(error),
         Err(ExecutionError::GateFailed(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in tool step".to_owned())
@@ -441,6 +444,7 @@ fn model_command(arguments: Vec<String>) -> ExitCode {
         Err(ExecutionError::Model(error)) => command_error(error),
         Err(ExecutionError::Store(error)) => command_error(error),
         Err(ExecutionError::Sandbox(error)) => command_error(error),
+        Err(ExecutionError::Plan(error)) => command_error(error),
         Err(ExecutionError::GateFailed(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in model step".to_owned())
@@ -507,6 +511,14 @@ fn gate_command(arguments: Vec<String>) -> ExitCode {
 }
 
 fn agent_command(arguments: Vec<String>) -> ExitCode {
+    match arguments.first().map(String::as_str) {
+        Some("repo-fix") => repo_fix_command(arguments),
+        Some("repo-fix-model") => repo_fix_model_command(arguments),
+        _ => usage_error(AGENT_USAGE.to_owned()),
+    }
+}
+
+fn repo_fix_command(arguments: Vec<String>) -> ExitCode {
     if arguments.first().map(String::as_str) != Some("repo-fix") {
         return usage_error(AGENT_USAGE.to_owned());
     }
@@ -586,9 +598,110 @@ fn agent_command(arguments: Vec<String>) -> ExitCode {
         Err(ExecutionError::Store(error)) => command_error(error),
         Err(ExecutionError::Sandbox(error)) => sandbox_error(error),
         Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::Plan(error)) => command_error(error),
         Err(ExecutionError::GateFailed(error)) => command_error(error),
         Err(ExecutionError::SimulatedCrash { .. }) => {
             usage_error("unexpected simulated crash in agent workflow".to_owned())
+        }
+    }
+}
+
+fn repo_fix_model_command(arguments: Vec<String>) -> ExitCode {
+    let mut workspace = None;
+    let mut store_path = PathBuf::from(".agentrt/state.db");
+    let mut prompt = None;
+    let mut response = None;
+    let mut response_file = None;
+    let mut model = "fake-agent-planner".to_owned();
+    let mut run_id = None;
+    let mut pause_ms = 0;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--workspace" | "--store" | "--prompt" | "--response" | "--response-file"
+            | "--model" | "--run-id" | "--pause-ms" => {
+                let option = arguments[index].clone();
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return usage_error(format!("{option} requires a value\n\n{AGENT_USAGE}"));
+                };
+                match option.as_str() {
+                    "--workspace" => workspace = Some(PathBuf::from(value)),
+                    "--store" => store_path = PathBuf::from(value),
+                    "--prompt" => prompt = Some(value.clone()),
+                    "--response" => response = Some(value.clone()),
+                    "--response-file" => response_file = Some(PathBuf::from(value)),
+                    "--model" => model = value.clone(),
+                    "--run-id" => run_id = Some(value.clone()),
+                    "--pause-ms" => {
+                        pause_ms = match value.parse::<u64>() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                return usage_error("--pause-ms expects an integer".to_owned());
+                            }
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            "--help" | "-h" => return usage_error(AGENT_USAGE.to_owned()),
+            other => return usage_error(format!("unknown option `{other}`\n\n{AGENT_USAGE}")),
+        }
+        index += 1;
+    }
+
+    let Some(workspace) = workspace else {
+        return usage_error(format!("--workspace is required\n\n{AGENT_USAGE}"));
+    };
+    let Some(prompt) = prompt else {
+        return usage_error(format!("--prompt is required\n\n{AGENT_USAGE}"));
+    };
+    let response = match (response, response_file) {
+        (Some(response), None) => response,
+        (None, Some(path)) => match std::fs::read_to_string(path) {
+            Ok(response) => response,
+            Err(error) => return command_error(error),
+        },
+        (Some(_), Some(_)) => {
+            return usage_error("choose either --response or --response-file".to_owned());
+        }
+        (None, None) => {
+            return usage_error(format!(
+                "--response or --response-file is required\n\n{AGENT_USAGE}"
+            ));
+        }
+    };
+    if response.trim().is_empty() {
+        return usage_error(format!("model response is empty\n\n{AGENT_USAGE}"));
+    }
+
+    let request = ModelRequest {
+        model,
+        messages: vec![Message::user(prompt)],
+        temperature: 0.0,
+    };
+    let provider = FakeProvider::new(response);
+    match agent::repo_fix_from_model(
+        &store_path,
+        &workspace,
+        &provider,
+        &request,
+        run_id,
+        pause_ms,
+    ) {
+        Ok(result) => {
+            println!("run_id={}", result.run_id);
+            println!("status=succeeded");
+            println!("summary={}", result.output);
+            ExitCode::SUCCESS
+        }
+        Err(ExecutionError::Store(error)) => command_error(error),
+        Err(ExecutionError::Sandbox(error)) => sandbox_error(error),
+        Err(ExecutionError::Model(error)) => command_error(error),
+        Err(ExecutionError::Plan(error)) => command_error(error),
+        Err(ExecutionError::GateFailed(error)) => command_error(error),
+        Err(ExecutionError::SimulatedCrash { .. }) => {
+            usage_error("unexpected simulated crash in model workflow".to_owned())
         }
     }
 }

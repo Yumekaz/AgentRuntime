@@ -124,6 +124,11 @@ impl ToolRouter {
         Ok(std::fs::read_to_string(path)?)
     }
 
+    pub(crate) fn validate_read(&self, relative_path: &str) -> Result<(), SandboxError> {
+        self.require_tool(Tool::ReadFile, relative_path)?;
+        self.resolve_existing(relative_path).map(|_| ())
+    }
+
     pub(crate) fn write_file(
         &self,
         relative_path: &str,
@@ -149,6 +154,30 @@ impl ToolRouter {
         let path = self.resolve_for_write(relative_path)?;
         std::fs::write(path, contents)?;
         Ok(())
+    }
+
+    pub(crate) fn validate_write(
+        &self,
+        relative_path: &str,
+        contents: &str,
+    ) -> Result<(), SandboxError> {
+        self.require_tool(Tool::WriteFile, relative_path)?;
+        if !self.policy.allow_write {
+            return Err(SandboxError::Denied {
+                rule: "writes are disabled by policy".to_owned(),
+                attempted: PathBuf::from(relative_path),
+            });
+        }
+        if contents.len() > self.policy.max_write_bytes {
+            return Err(SandboxError::Denied {
+                rule: format!(
+                    "write exceeds maximum size of {} bytes",
+                    self.policy.max_write_bytes
+                ),
+                attempted: PathBuf::from(relative_path),
+            });
+        }
+        self.resolve_for_write(relative_path).map(|_| ())
     }
 
     pub(crate) fn list_dir(&self, relative_path: &str) -> Result<Vec<String>, SandboxError> {

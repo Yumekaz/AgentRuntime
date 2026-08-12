@@ -10,6 +10,96 @@ use serde_json::{Value, json};
 use std::fmt;
 use std::time::Duration;
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct AgentPlan {
+    pub(crate) version: u32,
+    pub(crate) summary: String,
+    pub(crate) actions: Vec<PlanAction>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PlanAction {
+    Read { path: String },
+    Write { path: String, contents: String },
+    GateContains { path: String, expected: String },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum PlanError {
+    Decode(String),
+    Invalid(String),
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(message) => write!(formatter, "model plan JSON error: {message}"),
+            Self::Invalid(message) => write!(formatter, "invalid model plan: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+impl AgentPlan {
+    pub(crate) fn parse(text: &str) -> Result<Self, PlanError> {
+        let plan: Self =
+            serde_json::from_str(text).map_err(|error| PlanError::Decode(error.to_string()))?;
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    fn validate(&self) -> Result<(), PlanError> {
+        if self.version != 1 {
+            return Err(PlanError::Invalid(format!(
+                "unsupported version {}; expected 1",
+                self.version
+            )));
+        }
+        if self.summary.trim().is_empty() {
+            return Err(PlanError::Invalid("summary is empty".to_owned()));
+        }
+        if self.actions.is_empty() || self.actions.len() > 16 {
+            return Err(PlanError::Invalid(
+                "actions must contain between 1 and 16 items".to_owned(),
+            ));
+        }
+        for action in &self.actions {
+            let path = match action {
+                PlanAction::Read { path }
+                | PlanAction::Write { path, .. }
+                | PlanAction::GateContains { path, .. } => path,
+            };
+            validate_relative_path(path)?;
+            if let PlanAction::GateContains { expected, .. } = action
+                && expected.is_empty()
+            {
+                return Err(PlanError::Invalid("gate expected text is empty".to_owned()));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_relative_path(path: &str) -> Result<(), PlanError> {
+    let path_object = std::path::Path::new(path);
+    if path.is_empty()
+        || path.contains('\0')
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains(':')
+        || path_object
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(PlanError::Invalid(format!(
+            "path `{path}` must be a safe relative path"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Message {
     pub(crate) role: String,
@@ -276,7 +366,7 @@ fn redact_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{FakeProvider, Message, ModelRequest, complete_with_audit};
+    use super::{AgentPlan, FakeProvider, Message, ModelRequest, PlanAction, complete_with_audit};
     use crate::run::{StepDefinition, new_run_id};
     use crate::store::Store;
     use std::path::PathBuf;
@@ -324,5 +414,36 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).expect("store removes");
+    }
+
+    #[test]
+    fn structured_plan_parses_typed_actions() {
+        let plan = AgentPlan::parse(
+            r#"{
+                "version": 1,
+                "summary": "repair the fixture",
+                "actions": [
+                    {"kind": "read", "path": "fixture.txt"},
+                    {"kind": "write", "path": "fixture.txt", "contents": "fixed"},
+                    {"kind": "gate_contains", "path": "fixture.txt", "expected": "fixed"}
+                ]
+            }"#,
+        )
+        .expect("plan parses");
+        assert_eq!(plan.version, 1);
+        assert_eq!(plan.actions.len(), 3);
+        assert!(matches!(plan.actions[0], PlanAction::Read { .. }));
+    }
+
+    #[test]
+    fn structured_plan_rejects_unsafe_paths() {
+        let result = AgentPlan::parse(
+            r#"{
+                "version": 1,
+                "summary": "escape",
+                "actions": [{"kind": "read", "path": "../secret.txt"}]
+            }"#,
+        );
+        assert!(matches!(result, Err(super::PlanError::Invalid(_))));
     }
 }

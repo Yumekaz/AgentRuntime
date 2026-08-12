@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "summary": "model repaired fixture",
+  "actions": [
+    {"kind": "read", "path": "input.txt"},
+    {"kind": "write", "path": "input.txt", "contents": "status=fixed\n"},
+    {"kind": "read", "path": "input.txt"},
+    {"kind": "gate_contains", "path": "input.txt", "expected": "status=fixed"}
+  ]
+}

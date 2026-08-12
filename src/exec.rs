@@ -2,7 +2,7 @@
 
 use crate::audit::sha256_hex;
 use crate::gate;
-use crate::model::{ModelError, ModelProvider, ModelRequest, complete_with_audit};
+use crate::model::{ModelError, ModelProvider, ModelRequest, PlanError, complete_with_audit};
 use crate::run::{RunStatus, StepDefinition};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError};
@@ -13,6 +13,7 @@ pub(crate) enum ExecutionError {
     Store(StoreError),
     Sandbox(SandboxError),
     Model(ModelError),
+    Plan(String),
     GateFailed(String),
     SimulatedCrash { run_id: String, completed: usize },
 }
@@ -23,6 +24,7 @@ impl fmt::Display for ExecutionError {
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Sandbox(error) => write!(formatter, "{error}"),
             Self::Model(error) => write!(formatter, "{error}"),
+            Self::Plan(error) => write!(formatter, "{error}"),
             Self::GateFailed(error) => write!(formatter, "gate failed: {error}"),
             Self::SimulatedCrash { run_id, completed } => write!(
                 formatter,
@@ -49,6 +51,12 @@ impl From<SandboxError> for ExecutionError {
 impl From<ModelError> for ExecutionError {
     fn from(error: ModelError) -> Self {
         Self::Model(error)
+    }
+}
+
+impl From<PlanError> for ExecutionError {
+    fn from(error: PlanError) -> Self {
+        Self::Plan(error.to_string())
     }
 }
 
@@ -86,10 +94,35 @@ pub(crate) fn execute_llm_step<P: ModelProvider>(
     provider: &P,
     request: &ModelRequest,
 ) -> Result<String, ExecutionError> {
-    store.mark_running(run_id)?;
+    execute_llm_step_with_finish(store, run_id, definition, provider, request, true)
+}
+
+pub(crate) fn execute_llm_step_in_run<P: ModelProvider>(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    provider: &P,
+    request: &ModelRequest,
+) -> Result<String, ExecutionError> {
+    execute_llm_step_with_finish(store, run_id, definition, provider, request, false)
+}
+
+fn execute_llm_step_with_finish<P: ModelProvider>(
+    store: &Store,
+    run_id: &str,
+    definition: &StepDefinition,
+    provider: &P,
+    request: &ModelRequest,
+    finish_run: bool,
+) -> Result<String, ExecutionError> {
+    if store.load_run(run_id)?.status != RunStatus::Running {
+        store.mark_running(run_id)?;
+    }
     let response = complete_with_audit(store, run_id, definition.index, provider, request)?;
     store.complete_step(run_id, definition.index, &response.text)?;
-    store.finish_run(run_id)?;
+    if finish_run {
+        store.finish_run(run_id)?;
+    }
     Ok(response.text)
 }
 

@@ -161,6 +161,41 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn append_steps(
+        &self,
+        run_id: &str,
+        steps: &[StepDefinition],
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let exists: Option<String> = transaction
+            .query_row(
+                "SELECT run_id FROM runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(StoreError::RunNotFound(run_id.to_owned()));
+        }
+
+        for step in steps {
+            transaction.execute(
+                "INSERT OR IGNORE INTO steps (run_id, step_index, step_id, status)
+                 VALUES (?1, ?2, ?3, 'pending')",
+                params![run_id, step.index as i64, step.id],
+            )?;
+        }
+        append_event(
+            &transaction,
+            run_id,
+            "run.plan_expanded",
+            None,
+            &format!("added_steps={}", steps.len()),
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn mark_running(&self, run_id: &str) -> Result<(), StoreError> {
         let previous_status: Option<String> = self
             .connection

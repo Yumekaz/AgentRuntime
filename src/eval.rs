@@ -2,6 +2,7 @@
 
 use crate::agent;
 use crate::gate;
+use crate::model::{FakeProvider, Message, ModelRequest};
 use crate::run::new_run_id;
 use crate::sandbox::{Policy, ToolRouter};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ impl std::fmt::Display for EvalReport {
 
 pub(crate) fn run_suite(break_regression: bool) -> EvalReport {
     let mut report = EvalReport {
-        total: 5,
+        total: 6,
         passed: 0,
         failures: Vec::new(),
     };
@@ -136,6 +137,40 @@ pub(crate) fn run_suite(break_regression: bool) -> EvalReport {
         },
     );
 
+    run_case(&mut report, "model plan is executed through gates", || {
+        let workspace = fixture_workspace(
+            "model-plan",
+            include_str!("../fixtures/evals/repo-fix/input.txt"),
+        )?;
+        let store = temporary_store("model-plan");
+        let response = r#"{
+            "version": 1,
+            "summary": "model repaired fixture",
+            "actions": [
+                {"kind": "read", "path": "input.txt"},
+                {"kind": "write", "path": "input.txt", "contents": "status=fixed\n"},
+                {"kind": "read", "path": "input.txt"},
+                {"kind": "gate_contains", "path": "input.txt", "expected": "status=fixed"}
+            ]
+        }"#;
+        let provider = FakeProvider::new(response);
+        let request = ModelRequest {
+            model: "fake-agent-planner".to_owned(),
+            messages: vec![Message::user("repair fixture")],
+            temperature: 0.0,
+        };
+        let result = agent::repo_fix_from_model(&store, &workspace, &provider, &request, None, 0)
+            .map_err(|error| error.to_string())?;
+        let output = std::fs::read_to_string(workspace.join("input.txt"))
+            .map_err(|error| error.to_string())?;
+        cleanup(&workspace, &store);
+        if output == "status=fixed\n" && result.output == "model repaired fixture" {
+            Ok(())
+        } else {
+            Err("model plan did not produce the expected repair".to_owned())
+        }
+    });
+
     report
 }
 
@@ -175,13 +210,13 @@ mod tests {
     fn default_eval_suite_passes() {
         let report = run_suite(false);
         assert!(report.succeeded(), "{report}");
-        assert_eq!(report.total, 5);
+        assert_eq!(report.total, 6);
     }
 
     #[test]
     fn intentional_regression_fails_the_suite() {
         let report = run_suite(true);
         assert!(!report.succeeded());
-        assert_eq!(report.passed, 4);
+        assert_eq!(report.passed, 5);
     }
 }
