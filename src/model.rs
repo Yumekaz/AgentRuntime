@@ -1,4 +1,4 @@
-//! Provider-neutral model interfaces and an OpenAI-compatible adapter.
+//! Provider-neutral model interfaces and model provider adapters.
 
 #![allow(dead_code)]
 
@@ -194,6 +194,108 @@ pub(crate) struct OpenAiCompatibleProvider {
     max_retries: usize,
 }
 
+pub(crate) struct GeminiProvider {
+    api_key: String,
+    model: String,
+    client: Client,
+    max_retries: usize,
+}
+
+impl GeminiProvider {
+    pub(crate) fn new(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        timeout: Duration,
+        max_retries: usize,
+    ) -> Result<Self, ModelError> {
+        let api_key = api_key.into();
+        if api_key.trim().is_empty() {
+            return Err(ModelError::Configuration(
+                "Gemini API key is empty".to_owned(),
+            ));
+        }
+        let model = model.into();
+        if model.trim().is_empty() {
+            return Err(ModelError::Configuration(
+                "Gemini model is empty".to_owned(),
+            ));
+        }
+        let client = Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|error| ModelError::Configuration(error.to_string()))?;
+        Ok(Self {
+            api_key,
+            model,
+            client,
+            max_retries,
+        })
+    }
+}
+
+impl ModelProvider for GeminiProvider {
+    fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        let prompt = request
+            .messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = json!({"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": request.temperature, "maxOutputTokens": 2048}});
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
+        );
+        for attempt in 0..=self.max_retries {
+            let response = self
+                .client
+                .post(&endpoint)
+                .query(&[("key", &self.api_key)])
+                .json(&body)
+                .send();
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let response_body = response
+                        .text()
+                        .map_err(|error| ModelError::Http(error.to_string()))?;
+                    if status.is_success() {
+                        return parse_gemini_response(&response_body);
+                    }
+                    if !status.is_server_error() || attempt == self.max_retries {
+                        return Err(ModelError::Provider {
+                            status: status.as_u16(),
+                            body: redact_text(&response_body),
+                        });
+                    }
+                }
+                Err(_error) if attempt == self.max_retries => {
+                    return Err(ModelError::Http(
+                        "Gemini request failed after retries".to_owned(),
+                    ));
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(50 * 2_u64.pow(attempt as u32)));
+        }
+        Err(ModelError::Http("retry loop exhausted".to_owned()))
+    }
+}
+
+pub(crate) enum ConfiguredProvider {
+    Fake(FakeProvider),
+    Gemini(GeminiProvider),
+}
+
+impl ModelProvider for ConfiguredProvider {
+    fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+        match self {
+            Self::Fake(provider) => provider.complete(request),
+            Self::Gemini(provider) => provider.complete(request),
+        }
+    }
+}
+
 impl OpenAiCompatibleProvider {
     pub(crate) fn new(
         endpoint: impl Into<String>,
@@ -324,6 +426,31 @@ fn parse_openai_response(body: &str) -> Result<ModelResponse, ModelError> {
     Ok(ModelResponse {
         text: text.to_owned(),
         provider_request_id: value.get("id").and_then(Value::as_str).map(str::to_owned),
+    })
+}
+
+fn parse_gemini_response(body: &str) -> Result<ModelResponse, ModelError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| ModelError::Decode(error.to_string()))?;
+    let text = value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.first())
+        .and_then(|part| part.get("text"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ModelError::Decode("missing candidates[0].content.parts[0].text".to_owned())
+        })?;
+    Ok(ModelResponse {
+        text: text.to_owned(),
+        provider_request_id: value
+            .get("responseId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 

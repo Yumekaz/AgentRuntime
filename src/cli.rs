@@ -5,7 +5,7 @@ use crate::agent;
 use crate::audit;
 use crate::exec::{self, ExecutionError, ToolAction, idempotency_key};
 use crate::gate;
-use crate::model::{FakeProvider, Message, ModelRequest};
+use crate::model::{ConfiguredProvider, FakeProvider, GeminiProvider, Message, ModelRequest};
 use crate::run::{StepDefinition, new_run_id};
 use crate::sandbox::{Policy, SandboxError, Tool, ToolRouter};
 use crate::store::{Store, StoreError, ToolStepSpec};
@@ -28,6 +28,7 @@ const AGENT_USAGE: &str = "Usage:\n  agentrt agent repo-fix --workspace <path> -
 const EVAL_USAGE: &str = "Usage:\n  agentrt eval [--break]";
 
 pub(crate) fn run() -> ExitCode {
+    load_dotenv();
     let mut args = std::env::args().skip(1);
 
     match args.next().as_deref() {
@@ -429,7 +430,7 @@ fn model_command(arguments: Vec<String>) -> ExitCode {
         return command_error(error);
     }
     let request = ModelRequest {
-        model,
+        model: model.clone(),
         messages: vec![Message::user(prompt)],
         temperature: 0.0,
     };
@@ -613,13 +614,14 @@ fn repo_fix_model_command(arguments: Vec<String>) -> ExitCode {
     let mut response = None;
     let mut response_file = None;
     let mut model = "fake-agent-planner".to_owned();
+    let mut provider_name = "fake".to_owned();
     let mut run_id = None;
     let mut pause_ms = 0;
     let mut index = 1;
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--workspace" | "--store" | "--prompt" | "--response" | "--response-file"
-            | "--model" | "--run-id" | "--pause-ms" => {
+            | "--model" | "--run-id" | "--pause-ms" | "--provider" => {
                 let option = arguments[index].clone();
                 index += 1;
                 let Some(value) = arguments.get(index) else {
@@ -632,6 +634,7 @@ fn repo_fix_model_command(arguments: Vec<String>) -> ExitCode {
                     "--response" => response = Some(value.clone()),
                     "--response-file" => response_file = Some(PathBuf::from(value)),
                     "--model" => model = value.clone(),
+                    "--provider" => provider_name = value.clone(),
                     "--run-id" => run_id = Some(value.clone()),
                     "--pause-ms" => {
                         pause_ms = match value.parse::<u64>() {
@@ -665,22 +668,42 @@ fn repo_fix_model_command(arguments: Vec<String>) -> ExitCode {
         (Some(_), Some(_)) => {
             return usage_error("choose either --response or --response-file".to_owned());
         }
+        (None, None) if provider_name == "gemini" => String::new(),
         (None, None) => {
             return usage_error(format!(
                 "--response or --response-file is required\n\n{AGENT_USAGE}"
             ));
         }
     };
-    if response.trim().is_empty() {
+    if provider_name == "fake" && response.trim().is_empty() {
         return usage_error(format!("model response is empty\n\n{AGENT_USAGE}"));
     }
 
     let request = ModelRequest {
-        model,
+        model: model.clone(),
         messages: vec![Message::user(prompt)],
         temperature: 0.0,
     };
-    let provider = FakeProvider::new(response);
+    let provider = if provider_name == "gemini" {
+        let Some(api_key) = std::env::var_os("GEMINI_API_KEY") else {
+            return usage_error(
+                "GEMINI_API_KEY is not set; add it to .env or the environment".to_owned(),
+            );
+        };
+        match GeminiProvider::new(
+            api_key.to_string_lossy(),
+            model.clone(),
+            std::time::Duration::from_secs(30),
+            2,
+        ) {
+            Ok(provider) => ConfiguredProvider::Gemini(provider),
+            Err(error) => return command_error(StoreError::InvalidStatus(error.to_string())),
+        }
+    } else if provider_name == "fake" {
+        ConfiguredProvider::Fake(FakeProvider::new(response))
+    } else {
+        return usage_error("--provider must be fake or gemini".to_owned());
+    };
     match agent::repo_fix_from_model(
         &store_path,
         &workspace,
@@ -722,6 +745,32 @@ fn eval_command(arguments: Vec<String>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+fn load_dotenv() {
+    let Ok(contents) = std::fs::read_to_string(".env") else {
+        return;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || std::env::var_os(name).is_some() {
+            continue;
+        }
+        let value = value.trim().trim_matches('"');
+        if !value.is_empty() {
+            // This is a local CLI convenience loader; values never enter audit events.
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
     }
 }
 

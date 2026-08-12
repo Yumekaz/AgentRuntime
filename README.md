@@ -32,6 +32,8 @@ cargo run -- tool write --workspace ./fixtures/workspace --path output.txt --con
 cargo run -- model fake --store .agentrt/model.db --model fake-model --prompt "summarize fixture" --response "fixture summary"
 cargo run -- agent repo-fix --workspace ./fixtures/workspace --path fixture.txt --find "status=broken" --replace "status=fixed" --store .agentrt/agent.db
 cargo run -- agent repo-fix-model --workspace ./fixtures/workspace --prompt "repair fixture" --response-file ./fixtures/evals/model-plan/plan.json --store .agentrt/model-agent.db
+# Live Gemini 2.5 Flash planning; put GEMINI_API_KEY in the ignored .env file first.
+cargo run -- agent repo-fix-model --provider gemini --model gemini-2.5-flash --workspace ./fixtures/workspace --prompt "repair fixture" --store .agentrt/gemini-agent.db
 cargo run -- eval
 # Demonstrate a deliberate regression; this must exit with status 1.
 cargo run -- eval --break
@@ -44,7 +46,7 @@ Filesystem tools accept only relative paths within the declared workspace. Raw s
 Tool results use persisted idempotency keys: recovery deduplicates effects whose result was recorded before the crash. Arbitrary external side effects cannot honestly be claimed exactly-once without cooperation from the tool.
 The filesystem policy is not a Windows security boundary: it constrains these typed tools, rejects traversal and symlink writes, and bounds write size, but it does not jail arbitrary processes or network traffic.
 
-The model adapter supports deterministic `FakeProvider` tests and OpenAI-compatible chat-completions endpoints over HTTPS. Provider credentials are never included in audit payloads; request content is structurally redacted and response content is hashed.
+The model adapter supports deterministic `FakeProvider` tests, Gemini `generateContent`, and OpenAI-compatible chat-completions endpoints over HTTPS. Provider credentials are read from local environment configuration, never included in audit payloads, and never printed by provider errors; request content is structurally redacted and response content is hashed.
 
 ## Scope
 
